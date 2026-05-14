@@ -1,7 +1,6 @@
 """索引管理器 - 使用SQLite存储xlsx文件索引"""
 import sqlite3
 import os
-import sys
 from typing import List, Dict, Tuple
 
 class IndexManager:
@@ -9,7 +8,7 @@ class IndexManager:
         if db_path is None:
             # 在用户目录创建数据库
             user_home = os.path.expanduser("~")
-            app_data_dir = os.path.join(user_home, "XlsxSearcher")
+            app_data_dir = os.path.join(user_home, ".local", "XlsxSearcher")
             os.makedirs(app_data_dir, exist_ok=True)
             db_path = os.path.join(app_data_dir, "index.db")
         self.db_path = db_path
@@ -112,78 +111,90 @@ class IndexManager:
             for r in rows
         ]
 
-    def search_by_sheet_name(self, keyword: str) -> List[Dict]:
-        """按子表名称模糊搜索"""
+    def _build_match_clause(self, field_name: str, keyword: str, match_mode: str) -> Tuple[str, str]:
+        normalized_mode = match_mode or 'fuzzy'
+        if normalized_mode == 'exact':
+            return f"LOWER({field_name}) = LOWER(?)", keyword
+        if normalized_mode == 'prefix':
+            return f"{field_name} LIKE ? COLLATE NOCASE", f'{keyword}%'
+        return f"{field_name} LIKE ? COLLATE NOCASE", f'%{keyword}%'
+
+    def _fetch_grouped_results(
+        self,
+        sheet_keyword: str = None,
+        filename_keyword: str = None,
+        match_mode: str = 'fuzzy'
+    ) -> List[Dict]:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('''
-            SELECT f.filename, f.filepath, s.sheet_name
-            FROM sheets s
-            JOIN xlsx_files f ON s.file_id = f.id
-            WHERE s.sheet_name LIKE ?
-            ORDER BY f.filename
-        ''', (f'%{keyword}%',))
+
+        query = [
+            'SELECT f.filename, f.filepath, s.sheet_name',
+            'FROM xlsx_files f',
+            'LEFT JOIN sheets s ON f.id = s.file_id'
+        ]
+        conditions = []
+        params = []
+
+        if filename_keyword:
+            clause, value = self._build_match_clause('f.filename', filename_keyword, match_mode)
+            conditions.append(clause)
+            params.append(value)
+
+        if sheet_keyword:
+            clause, value = self._build_match_clause('s.sheet_name', sheet_keyword, match_mode)
+            conditions.append(clause)
+            params.append(value)
+
+        if conditions:
+            query.append('WHERE ' + ' AND '.join(conditions))
+
+        query.append('ORDER BY LOWER(f.filename), LOWER(s.sheet_name)')
+        cursor.execute('\n'.join(query), tuple(params))
         rows = cursor.fetchall()
         conn.close()
-        return [{'filename': r[0], 'filepath': r[1], 'sheet_name': r[2]} for r in rows]
 
-    def search_by_filename(self, keyword: str) -> List[Dict]:
-        """按文件名模糊搜索"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT f.filename, f.filepath, GROUP_CONCAT(s.sheet_name, ', ')
-            FROM xlsx_files f
-            LEFT JOIN sheets s ON f.id = s.file_id
-            WHERE f.filename LIKE ?
-            GROUP BY f.id
-            ORDER BY f.filename
-        ''', (f'%{keyword}%',))
-        rows = cursor.fetchall()
-        conn.close()
-        return [{'filename': r[0], 'filepath': r[1], 'sheet_names': r[2]} for r in rows]
+        grouped = {}
+        for filename, filepath, sheet_name in rows:
+            entry = grouped.setdefault(
+                filepath,
+                {
+                    'filename': filename,
+                    'filepath': filepath,
+                    'sheet_names': []
+                }
+            )
+            if sheet_name:
+                entry['sheet_names'].append(sheet_name)
 
-    def search(self, sheet_keyword: str = None, filename_keyword: str = None) -> List[Dict]:
+        results = list(grouped.values())
+        for result in results:
+            result['sheet_count'] = len(result['sheet_names'])
+            result['sheet_names_display'] = ', '.join(result['sheet_names'])
+        return results
+
+    def get_all_files_with_sheets(self) -> List[Dict]:
+        """获取所有已索引文件及其子表"""
+        return self._fetch_grouped_results()
+
+    def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
+        """按子表名称搜索"""
+        return self._fetch_grouped_results(sheet_keyword=keyword, match_mode=match_mode)
+
+    def search_by_filename(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
+        """按文件名搜索"""
+        return self._fetch_grouped_results(filename_keyword=keyword, match_mode=match_mode)
+
+    def search(
+        self,
+        sheet_keyword: str = None,
+        filename_keyword: str = None,
+        match_mode: str = 'fuzzy'
+    ) -> List[Dict]:
         """综合搜索"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        if sheet_keyword and filename_keyword:
-            # 组合搜索
-            cursor.execute('''
-                SELECT f.filename, f.filepath, s.sheet_name
-                FROM sheets s
-                JOIN xlsx_files f ON s.file_id = f.id
-                WHERE s.sheet_name LIKE ? AND f.filename LIKE ?
-                ORDER BY f.filename
-            ''', (f'%{sheet_keyword}%', f'%{filename_keyword}%'))
-        elif sheet_keyword:
-            cursor.execute('''
-                SELECT f.filename, f.filepath, s.sheet_name
-                FROM sheets s
-                JOIN xlsx_files f ON s.file_id = f.id
-                WHERE s.sheet_name LIKE ?
-                ORDER BY f.filename
-            ''', (f'%{sheet_keyword}%',))
-        elif filename_keyword:
-            cursor.execute('''
-                SELECT f.filename, f.filepath, GROUP_CONCAT(s.sheet_name, ', ')
-                FROM xlsx_files f
-                LEFT JOIN sheets s ON f.id = s.file_id
-                WHERE f.filename LIKE ?
-                GROUP BY f.id
-                ORDER BY f.filename
-            ''', (f'%{filename_keyword}%',))
-        else:
+        if not sheet_keyword and not filename_keyword:
             return []
-
-        rows = cursor.fetchall()
-        conn.close()
-
-        if sheet_keyword and not filename_keyword:
-            return [{'filename': r[0], 'filepath': r[1], 'sheet_name': r[2]} for r in rows]
-        else:
-            return [{'filename': r[0], 'filepath': r[1], 'sheet_names': r[2]} for r in rows]
+        return self._fetch_grouped_results(sheet_keyword, filename_keyword, match_mode)
 
     def clear_index(self):
         """清空所有索引"""

@@ -1,14 +1,14 @@
 """XlsxSearcher 主界面 - PyQt5 版本"""
+import csv
+import json
 import os
 import sys
-import threading
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
-    QSplitter, QStatusBar, QProgressBar, QMessageBox, QFileDialog
+    QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
 
 from core.indexer import IndexManager
 from core.scanner import XlsxScanner
@@ -45,6 +45,8 @@ class ScanWorker(QThread):
 
 
 class XlsxSearcherApp(QMainWindow):
+    MAX_SEARCH_HISTORY = 15
+
     def __init__(self):
         super().__init__()
 
@@ -52,13 +54,21 @@ class XlsxSearcherApp(QMainWindow):
         self.index_manager = IndexManager()
         self.scanner = XlsxScanner()
         self.searcher = Searcher(self.index_manager)
+        self.settings = QSettings('XlsxSearcher', 'XlsxSearcher')
 
         # 状态变量
         self.scan_directory = None
         self.search_results = []
+        self.search_history = []
         self.is_scanning = False
+        self.current_sort_mode = 'filename_asc'
+        self.current_view_mode = 'grouped'
 
         self._init_ui()
+        self._restore_ui_preferences()
+        self._restore_scan_directory()
+        self._restore_search_history()
+        self._check_existing_index()
 
     def _init_ui(self):
         """初始化UI"""
@@ -99,6 +109,8 @@ class XlsxSearcherApp(QMainWindow):
         self.sheet_entry = QLineEdit()
         self.sheet_entry.setPlaceholderText("子表名称")
         self.sheet_entry.textChanged.connect(self._do_search)
+        self.sheet_entry.returnPressed.connect(self._on_search_committed)
+        self.sheet_entry.editingFinished.connect(self._on_search_committed)
         search_layout.addWidget(QLabel("子表名称:"))
         search_layout.addWidget(self.sheet_entry)
 
@@ -106,8 +118,40 @@ class XlsxSearcherApp(QMainWindow):
         self.filename_entry = QLineEdit()
         self.filename_entry.setPlaceholderText("文件名")
         self.filename_entry.textChanged.connect(self._do_search)
+        self.filename_entry.returnPressed.connect(self._on_search_committed)
+        self.filename_entry.editingFinished.connect(self._on_search_committed)
         search_layout.addWidget(QLabel("文件名:"))
         search_layout.addWidget(self.filename_entry)
+
+        self.match_mode_combo = QComboBox()
+        self.match_mode_combo.addItem("模糊匹配", 'fuzzy')
+        self.match_mode_combo.addItem("前缀匹配", 'prefix')
+        self.match_mode_combo.addItem("精确匹配", 'exact')
+        self.match_mode_combo.currentIndexChanged.connect(self._do_search)
+        search_layout.addWidget(QLabel("匹配:"))
+        search_layout.addWidget(self.match_mode_combo)
+
+        self.sort_mode_combo = QComboBox()
+        self.sort_mode_combo.addItem("文件名 A-Z", 'filename_asc')
+        self.sort_mode_combo.addItem("文件名 Z-A", 'filename_desc')
+        self.sort_mode_combo.addItem("子表数最多", 'sheet_count_desc')
+        self.sort_mode_combo.addItem("子表数最少", 'sheet_count_asc')
+        self.sort_mode_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
+        search_layout.addWidget(QLabel("排序:"))
+        search_layout.addWidget(self.sort_mode_combo)
+
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItem("分组视图", 'grouped')
+        self.view_mode_combo.addItem("列表视图", 'flat')
+        self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
+        search_layout.addWidget(QLabel("视图:"))
+        search_layout.addWidget(self.view_mode_combo)
+
+        self.history_combo = QComboBox()
+        self.history_combo.setMinimumWidth(220)
+        self.history_combo.addItem("最近搜索")
+        self.history_combo.currentIndexChanged.connect(self._on_history_selected)
+        search_layout.addWidget(self.history_combo)
 
         # 状态栏
         self.status_bar = QStatusBar()
@@ -116,11 +160,12 @@ class XlsxSearcherApp(QMainWindow):
 
         # 结果列表
         self.result_tree = QTreeWidget()
-        self.result_tree.setHeaderLabels(["文件名", "子表名称", "文件路径"])
-        self.result_tree.setColumnWidth(0, 200)
-        self.result_tree.setColumnWidth(1, 150)
+        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
+        self.result_tree.setColumnWidth(0, 280)
+        self.result_tree.setColumnWidth(1, 100)
         self.result_tree.setColumnWidth(2, 500)
         self.result_tree.setAlternatingRowColors(True)
+        self.result_tree.setRootIsDecorated(True)
 
         # 绑定事件
         self.result_tree.itemClicked.connect(self._on_select)
@@ -146,9 +191,14 @@ class XlsxSearcherApp(QMainWindow):
         self.btn_copy.clicked.connect(self._copy_path)
         self.btn_copy.setEnabled(False)
 
+        self.btn_export = QPushButton("导出结果")
+        self.btn_export.clicked.connect(self._export_results)
+        self.btn_export.setEnabled(False)
+
         bottom_layout.addWidget(self.btn_open)
         bottom_layout.addWidget(self.btn_locate)
         bottom_layout.addWidget(self.btn_copy)
+        bottom_layout.addWidget(self.btn_export)
         bottom_layout.addStretch()
 
         self.scan_progress = QProgressBar()
@@ -163,7 +213,128 @@ class XlsxSearcherApp(QMainWindow):
         """检查是否存在已保存的扫描目录（可选显示）"""
         stats = self.index_manager.get_stats()
         if stats['file_count'] > 0:
-            self.status_bar.showMessage(f"已加载索引：{stats['file_count']}文件, {stats['sheet_count']}子表")
+            self._do_search()
+
+    def _restore_scan_directory(self):
+        """恢复上次扫描目录"""
+        saved_directory = self.settings.value('scan/last_directory', '')
+        if saved_directory and os.path.isdir(saved_directory):
+            self.scan_directory = saved_directory
+            self.dir_label.setText(self._truncate_path(saved_directory))
+            self.dir_label.setToolTip(saved_directory)
+            return
+
+        self.dir_label.setToolTip('')
+
+    def _restore_ui_preferences(self):
+        """恢复界面偏好设置"""
+        self.match_mode_combo.blockSignals(True)
+        self.sort_mode_combo.blockSignals(True)
+        self.view_mode_combo.blockSignals(True)
+
+        self._set_combo_by_data(
+            self.match_mode_combo,
+            self.settings.value('search/match_mode', 'fuzzy')
+        )
+        self._set_combo_by_data(
+            self.sort_mode_combo,
+            self.settings.value('search/sort_mode', self.current_sort_mode)
+        )
+        self._set_combo_by_data(
+            self.view_mode_combo,
+            self.settings.value('search/view_mode', self.current_view_mode)
+        )
+
+        self.match_mode_combo.blockSignals(False)
+        self.sort_mode_combo.blockSignals(False)
+        self.view_mode_combo.blockSignals(False)
+
+        self.current_sort_mode = self.sort_mode_combo.currentData()
+        self.current_view_mode = self.view_mode_combo.currentData()
+
+    def _set_combo_by_data(self, combo_box, value):
+        """按 data 值选中下拉项，避免启动时触发多余刷新"""
+        for index in range(combo_box.count()):
+            if combo_box.itemData(index) == value:
+                combo_box.setCurrentIndex(index)
+                return
+
+    def _save_ui_preferences(self):
+        """保存界面偏好设置"""
+        self.settings.setValue('search/match_mode', self.match_mode_combo.currentData())
+        self.settings.setValue('search/sort_mode', self.current_sort_mode)
+        self.settings.setValue('search/view_mode', self.current_view_mode)
+
+    def _save_scan_directory(self):
+        """保存当前扫描目录"""
+        if self.scan_directory:
+            self.settings.setValue('scan/last_directory', self.scan_directory)
+
+    def _restore_search_history(self):
+        """恢复最近搜索历史"""
+        raw_history = self.settings.value('search/history', '[]')
+        try:
+            history = json.loads(raw_history)
+        except (TypeError, json.JSONDecodeError):
+            history = []
+
+        self.search_history = [
+            item for item in history
+            if isinstance(item, dict)
+            and (item.get('sheet_keyword') or item.get('filename_keyword'))
+        ][:self.MAX_SEARCH_HISTORY]
+        self._refresh_history_combo()
+
+    def _save_search_history(self):
+        """保存最近搜索历史"""
+        self.settings.setValue('search/history', json.dumps(self.search_history, ensure_ascii=True))
+
+    def _refresh_history_combo(self):
+        """刷新最近搜索下拉框"""
+        self.history_combo.blockSignals(True)
+        self.history_combo.clear()
+        self.history_combo.addItem("最近搜索")
+
+        for item in self.search_history:
+            self.history_combo.addItem(self._format_history_label(item), item)
+
+        self.history_combo.setCurrentIndex(0)
+        self.history_combo.blockSignals(False)
+
+    def _format_history_label(self, item):
+        """格式化搜索历史显示文本"""
+        parts = []
+        if item.get('sheet_keyword'):
+            parts.append(f"子表:{item['sheet_keyword']}")
+        if item.get('filename_keyword'):
+            parts.append(f"文件:{item['filename_keyword']}")
+        parts.append(self._match_mode_label(item.get('match_mode', 'fuzzy')))
+        return ' | '.join(parts)
+
+    def _match_mode_label(self, match_mode):
+        """将匹配模式转成界面文案"""
+        mapping = {
+            'fuzzy': '模糊',
+            'prefix': '前缀',
+            'exact': '精确'
+        }
+        return mapping.get(match_mode, '模糊')
+
+    def _record_search_history(self, sheet_keyword, filename_keyword, match_mode):
+        """记录最近搜索，避免输入过程中产生大量噪音"""
+        if not sheet_keyword and not filename_keyword:
+            return
+
+        entry = {
+            'sheet_keyword': sheet_keyword,
+            'filename_keyword': filename_keyword,
+            'match_mode': match_mode
+        }
+        self.search_history = [item for item in self.search_history if item != entry]
+        self.search_history.insert(0, entry)
+        self.search_history = self.search_history[:self.MAX_SEARCH_HISTORY]
+        self._save_search_history()
+        self._refresh_history_combo()
 
     def _select_directory(self):
         """选择扫描目录"""
@@ -173,6 +344,8 @@ class XlsxSearcherApp(QMainWindow):
         if directory:
             self.scan_directory = directory
             self.dir_label.setText(self._truncate_path(directory))
+            self.dir_label.setToolTip(directory)
+            self._save_scan_directory()
             self._start_scan()
 
     def _rescan(self):
@@ -191,7 +364,7 @@ class XlsxSearcherApp(QMainWindow):
         self.scan_progress.setRange(0, 0)
 
         # 禁用按钮
-        for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export]:
             btn.setEnabled(False)
 
         # 启动扫描线程
@@ -218,8 +391,6 @@ class XlsxSearcherApp(QMainWindow):
         self.is_scanning = False
         self.scan_progress.setVisible(False)
 
-        stats = self.index_manager.get_stats()
-
         # 格式化耗时
         if duration >= 60:
             time_str = f"{duration / 60:.1f}分钟"
@@ -228,12 +399,9 @@ class XlsxSearcherApp(QMainWindow):
         else:
             time_str = f"{duration * 1000:.0f}毫秒"
 
-        self.status_bar.showMessage(
-            f"索引完成: {stats['file_count']}文件, {stats['sheet_count']}子表, 耗时 {time_str}"
-        )
-
         # 执行初始搜索
         self._do_search()
+        self._update_status_summary(prefix=f"索引完成，耗时 {time_str}")
 
     def _on_scan_error(self, error_msg):
         """扫描错误回调"""
@@ -249,39 +417,100 @@ class XlsxSearcherApp(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             self.index_manager.clear_index()
+            self.search_results = []
             self.result_tree.clear()
-            self.status_bar.showMessage("索引已清空")
+            self._update_status_summary(prefix='索引已清空')
 
     def _do_search(self):
         """执行搜索"""
         sheet_keyword = self.sheet_entry.text().strip()
         filename_keyword = self.filename_entry.text().strip()
+        match_mode = self.match_mode_combo.currentData()
+        self._save_ui_preferences()
 
         if not sheet_keyword and not filename_keyword:
-            # 显示所有已索引的文件
-            self.search_results = self.index_manager.get_all_files()
-            # 需要获取每个文件的子表
-            all_results = []
-            for file_info in self.search_results:
-                sheet_results = self.index_manager.search_by_filename(file_info['filename'])
-                all_results.extend(sheet_results)
-            self.search_results = all_results
+            self.search_results = self.index_manager.get_all_files_with_sheets()
         else:
-            self.search_results = self.searcher.search(sheet_keyword, filename_keyword)
+            self.search_results = self.searcher.search(sheet_keyword, filename_keyword, match_mode)
 
+        self._sort_results()
         self._update_results()
+
+    def _on_search_committed(self):
+        """仅在用户明确完成输入后写入搜索历史"""
+        sheet_keyword = self.sheet_entry.text().strip()
+        filename_keyword = self.filename_entry.text().strip()
+        match_mode = self.match_mode_combo.currentData()
+        self._record_search_history(sheet_keyword, filename_keyword, match_mode)
 
     def _update_results(self):
         """更新搜索结果表格"""
         self.result_tree.clear()
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
+            btn.setEnabled(False)
+        self.btn_export.setEnabled(bool(self.search_results))
+
+        if self.current_view_mode == 'flat':
+            self._update_flat_results()
+        else:
+            self._update_grouped_results()
+
+        self._update_status_summary()
+
+    def _update_grouped_results(self):
+        """按文件分组展示结果"""
+        self.result_tree.setRootIsDecorated(True)
+        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
 
         for result in self.search_results:
-            sheet_display = result.get('sheet_name') or result.get('sheet_names', '')
-            item = QTreeWidgetItem([
+            top_item = QTreeWidgetItem([
                 result['filename'],
-                str(sheet_display),
+                str(result.get('sheet_count', 0)),
                 result['filepath']
             ])
+            top_item.setData(0, Qt.UserRole, result['filepath'])
+            top_item.setData(0, Qt.UserRole + 1, 'file')
+            self.result_tree.addTopLevelItem(top_item)
+
+            for sheet_name in result.get('sheet_names', []):
+                child_item = QTreeWidgetItem([
+                    sheet_name,
+                    '',
+                    result['filepath']
+                ])
+                child_item.setData(0, Qt.UserRole, result['filepath'])
+                child_item.setData(0, Qt.UserRole + 1, 'sheet')
+                top_item.addChild(child_item)
+
+            if result.get('sheet_names'):
+                top_item.setExpanded(True)
+
+    def _update_flat_results(self):
+        """按旧版平铺列表展示结果"""
+        self.result_tree.setRootIsDecorated(False)
+        self.result_tree.setHeaderLabels(["文件名", "子表名称", "文件路径"])
+
+        for result in self.search_results:
+            sheet_names = result.get('sheet_names', [])
+            if sheet_names:
+                for sheet_name in sheet_names:
+                    item = QTreeWidgetItem([
+                        result['filename'],
+                        sheet_name,
+                        result['filepath']
+                    ])
+                    item.setData(0, Qt.UserRole, result['filepath'])
+                    item.setData(0, Qt.UserRole + 1, 'flat')
+                    self.result_tree.addTopLevelItem(item)
+                continue
+
+            item = QTreeWidgetItem([
+                result['filename'],
+                '',
+                result['filepath']
+            ])
+            item.setData(0, Qt.UserRole, result['filepath'])
+            item.setData(0, Qt.UserRole + 1, 'flat')
             self.result_tree.addTopLevelItem(item)
 
     def _on_select(self, item, column):
@@ -294,10 +523,76 @@ class XlsxSearcherApp(QMainWindow):
         """获取选中的文件路径"""
         selected_items = self.result_tree.selectedItems()
         if selected_items:
-            index = self.result_tree.indexOfTopLevelItem(selected_items[0])
-            if index < len(self.search_results):
-                return self.search_results[index]['filepath']
+            return selected_items[0].data(0, Qt.UserRole)
         return None
+
+    def _on_sort_mode_changed(self):
+        """切换排序模式"""
+        self.current_sort_mode = self.sort_mode_combo.currentData()
+        self._save_ui_preferences()
+        self._sort_results()
+        self._update_results()
+
+    def _on_view_mode_changed(self):
+        """切换结果视图模式"""
+        self.current_view_mode = self.view_mode_combo.currentData()
+        self._save_ui_preferences()
+        self._update_results()
+
+    def _on_history_selected(self, index):
+        """应用最近搜索历史"""
+        if index <= 0:
+            return
+
+        item = self.history_combo.itemData(index)
+        if not item:
+            return
+
+        self.sheet_entry.blockSignals(True)
+        self.filename_entry.blockSignals(True)
+        self.match_mode_combo.blockSignals(True)
+
+        self.sheet_entry.setText(item.get('sheet_keyword', ''))
+        self.filename_entry.setText(item.get('filename_keyword', ''))
+        self._set_combo_by_data(self.match_mode_combo, item.get('match_mode', 'fuzzy'))
+
+        self.sheet_entry.blockSignals(False)
+        self.filename_entry.blockSignals(False)
+        self.match_mode_combo.blockSignals(False)
+
+        self.history_combo.setCurrentIndex(0)
+        self._do_search()
+
+    def _sort_results(self):
+        """按当前规则排序结果"""
+        sort_mode = self.current_sort_mode or 'filename_asc'
+
+        if sort_mode.startswith('sheet_count'):
+            self.search_results.sort(
+                key=lambda item: (item.get('sheet_count', 0), item['filename'].lower(), item['filepath'].lower())
+            )
+            if sort_mode == 'sheet_count_desc':
+                self.search_results.reverse()
+            return
+
+        self.search_results.sort(
+            key=lambda item: (item['filename'].lower(), item['filepath'].lower())
+        )
+        if sort_mode == 'filename_desc':
+            self.search_results.reverse()
+
+    def _update_status_summary(self, prefix: str = None):
+        """更新结果统计"""
+        file_count = len(self.search_results)
+        matched_sheet_count = sum(result.get('sheet_count', 0) for result in self.search_results)
+        if self.is_scanning:
+            return
+        view_label = '分组视图' if self.current_view_mode == 'grouped' else '列表视图'
+        summary = f"{view_label}：找到 {file_count} 个文件，{matched_sheet_count} 个子表命中"
+        if prefix:
+            self.status_bar.showMessage(f"{prefix}；{summary}")
+            return
+        self.status_bar.showMessage(summary)
 
     def _open_file(self):
         """打开文件"""
@@ -331,6 +626,51 @@ class XlsxSearcherApp(QMainWindow):
                 QMessageBox.critical(self, "错误", "复制失败")
         else:
             QMessageBox.warning(self, "警告", "请先选择文件")
+
+    def _export_results(self):
+        """导出当前搜索结果为 CSV"""
+        if not self.search_results:
+            QMessageBox.information(self, "提示", "当前没有可导出的搜索结果")
+            return
+
+        default_path = os.path.join(os.path.expanduser('~'), 'xlsx_search_results.csv')
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            '导出搜索结果',
+            default_path,
+            'CSV Files (*.csv)'
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['文件名', '子表名称', '文件路径', '命中子表数'])
+
+                for result in self.search_results:
+                    sheet_names = result.get('sheet_names', [])
+                    if sheet_names:
+                        for sheet_name in sheet_names:
+                            writer.writerow([
+                                result['filename'],
+                                sheet_name,
+                                result['filepath'],
+                                result.get('sheet_count', 0)
+                            ])
+                        continue
+
+                    writer.writerow([
+                        result['filename'],
+                        '',
+                        result['filepath'],
+                        result.get('sheet_count', 0)
+                    ])
+
+            self.status_bar.showMessage(f'已导出 {len(self.search_results)} 个文件到 {file_path}')
+            QMessageBox.information(self, '成功', f'搜索结果已导出到:\n{file_path}')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出失败: {e}')
 
     def _truncate_path(self, path, max_length=50):
         """截断路径显示"""
