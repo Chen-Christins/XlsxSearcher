@@ -1,3 +1,5 @@
 openpyxl>=3.0.0
 pyperclip>=1.8.0
 PyQt5>=5.15.0
+Pillow>=9.0.0
+xlrd==1.2.0

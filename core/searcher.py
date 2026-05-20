@@ -10,19 +10,23 @@ class Searcher:
         self,
         sheet_keyword: str = None,
         filename_keyword: str = None,
+        cell_keyword: str = None,
         match_mode: str = 'fuzzy'
     ) -> List[Dict]:
         """
         搜索xlsx文件
         @param sheet_keyword: 子表名称关键字
         @param filename_keyword: 文件名关键字
+        @param cell_keyword: 单元格内容关键字
         @param match_mode: 匹配模式 exact / prefix / fuzzy
         @return: 搜索结果列表
         """
-        if not sheet_keyword and not filename_keyword:
+        if not sheet_keyword and not filename_keyword and not cell_keyword:
             return []
 
-        return self.index_manager.search(sheet_keyword, filename_keyword, match_mode)
+        return self.index_manager.search(
+            sheet_keyword, filename_keyword, cell_keyword, match_mode
+        )
 
     def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
         """仅按子表名称搜索"""

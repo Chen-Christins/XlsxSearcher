@@ -1,23 +1,26 @@
 # XlsxSearcher
 
-Excel 子表搜索工具 - 快速查找 xlsx 文件中的子表名称
+Excel 配置表搜索工具 — 面向游戏策划，快速定位 xlsx/xls 文件中的子表和单元格数据
 
 ## 功能特性
 
 - 🔍 **子表搜索**: 根据子表名称搜索，支持模糊、前缀、精确匹配
 - 📁 **文件搜索**: 根据文件名搜索，支持模糊、前缀、精确匹配
-- 📊 **组合搜索**: 同时按子表名称和文件名组合检索
+- 🧬 **单元格搜索**: 根据单元格实际内容搜索，快速定位"某个值在哪个表里"
+- 👁️ **Sheet 预览**: 选中结果即时预览前 20 行数据，无需打开 Excel
+- 📊 **组合搜索**: 同时按子表名称、文件名、单元格内容组合检索
 - 🧭 **视图切换**: 支持按文件分组展示，也支持旧版平铺列表展示
 - ↕️ **结果排序**: 支持按文件名或命中子表数排序
 - 📈 **结果统计**: 状态栏实时显示当前命中文件数和子表数
-- 🕘 **最近搜索**: 保存最近使用过的搜索条件组合，方便重复检索
-- 📂 **一键打开**: 双击或按钮直接用 Excel 打开文件
+- 🕘 **最近搜索**: 保存最近 15 条搜索组合，一键恢复
+- 📂 **一键打开**: 双击或用按钮直接用 Excel 打开文件
 - 🎯 **定位文件**: 在资源管理器/Finder 中定位并选中文件
 - 📋 **复制路径**: 一键复制文件完整路径到剪贴板
 - 📤 **导出结果**: 将当前搜索结果导出为 CSV 文件
 - ⚡ **索引加速**: 首次扫描后建立 SQLite 索引，搜索毫秒级响应
 - 🔄 **增量更新**: 重新扫描只更新有变化的文件
 - 💾 **偏好恢复**: 记住上次扫描目录、匹配模式、排序方式和视图模式
+- 🗜️ **预览折叠**: 支持 `Ctrl+`` 快捷键或按钮折叠/展开预览面板
 
 ## 环境要求
 
@@ -30,7 +33,6 @@ Excel 子表搜索工具 - 快速查找 xlsx 文件中的子表名称
 pip install -r requirements.txt
 ```
 
-
 ## 使用方法
 
 ```bash
@@ -39,15 +41,21 @@ python main.py
 
 ### 操作流程
 
-1. 点击 **"选择目录"** 按钮选择要扫描的文件夹
-2. 程序会自动扫描目录下所有 `xlsx` / `xlsm` 文件并建立索引
-3. 在搜索框输入关键词（子表名称或文件名）进行搜索
-4. 按需切换：
+1. 点击 **「选择目录」** 选择要扫描的文件夹
+2. 程序自动扫描目录下所有 `xlsx` / `xlsm` / `xls` 文件并建立索引
+3. 点击 **「深度索引」** 提取所有 sheet 的单元格内容（仅需做一次，后续增量扫描不受影响）
+4. 在搜索框输入关键词进行搜索：
+   - **子表名称**: 搜索 Sheet 名称
+   - **文件名**: 搜索文件名
+   - **单元格**: 搜索实际的单元格数值
+5. 切换搜索选项：
    - **匹配模式**: 模糊匹配 / 前缀匹配 / 精确匹配
    - **排序方式**: 文件名 A-Z / 文件名 Z-A / 子表数最多 / 子表数最少
    - **结果视图**: 分组视图 / 列表视图
    - **最近搜索**: 快速恢复最近使用过的搜索条件
-5. 选中搜索结果，点击底部按钮执行操作：
+6. **点击任意结果** → 下方预览面板显示前 20 行数据
+   - `Ctrl+`` 或点击 「▾ 折叠预览」按钮可收起/展开预览面板
+7. 使用底部按钮操作文件：
    - **打开文件**: 用默认程序打开文件
    - **定位文件**: 在文件管理器中选中文件
    - **复制路径**: 复制文件路径到剪贴板
@@ -56,8 +64,7 @@ python main.py
 其他功能：
 - **重新扫描**: 重新扫描当前选择的目录（只更新有变化的文件）
 - **清空索引**: 清除所有已建立的索引数据
-- **自动恢复目录**: 启动时恢复上次使用的扫描目录
-- **自动恢复偏好**: 启动时恢复匹配模式、排序方式和结果视图
+- **深度索引**: 提取所有 sheet 的单元格内容以支持单元格搜索
 
 ## 项目结构
 
@@ -65,9 +72,10 @@ python main.py
 XlsxSearcher/
 ├── main.py              # 程序入口
 ├── requirements.txt     # 依赖
+├── icons/               # 应用图标
 ├── core/
 │   ├── indexer.py       # SQLite 索引管理
-│   ├── scanner.py       # xlsx 文件扫描
+│   ├── scanner.py       # xlsx/xls 文件扫描
 │   └── searcher.py      # 搜索逻辑
 ├── gui/
 │   └── app.py           # PyQt5 主界面
@@ -80,43 +88,42 @@ XlsxSearcher/
 ### macOS
 
 ```bash
-# 已在依赖中包含
-pyinstaller --onefile --windowed --name XlsxSearcher --icon=icon.icns main.py
+pyinstaller --onefile --windowed --name XlsxSearcher \
+  --icon icons/app_icon.png \
+  --add-data "icons/app_icon.png:icons" \
+  main.py
 ```
 
-生成的 `.app` 文件在 `dist` 目录下。
+生成的 `.app` 在 `dist` 目录下，解压后双击运行。
 
 ### Windows
 
 ```bash
-# 已在依赖中包含
-pyinstaller --onefile --windowed --name XlsxSearcher --icon=icon.ico main.py
+pyinstaller --onefile --windowed --name XlsxSearcher \
+  --icon icons/app_icon.ico \
+  --add-data "icons/app_icon.png;icons" \
+  main.py
 ```
 
-生成的 `.exe` 文件在 `dist` 目录下。
+生成的 `.exe` 在 `dist` 目录下。
 
 ### Linux
 
 ```bash
-# 已在依赖中包含
-pyinstaller --onefile --windowed --name XlsxSearcher main.py
+pyinstaller --onefile --windowed --name XlsxSearcher \
+  --icon icons/app_icon.png \
+  --add-data "icons/app_icon.png:icons" \
+  main.py
 ```
 
 生成的可执行文件在 `dist` 目录下。
 
 ## 数据存储
 
-索引数据库和部分本地偏好保存在用户目录下的隐藏目录中：
+索引数据库和本地偏好保存在用户目录下：
 
-- **所有平台**: `~/.local/XlsxSearcher/index.db`
-
-本地偏好包括：
-
-- 上次扫描目录
-- 最近搜索历史
-- 搜索匹配模式
-- 排序方式
-- 结果视图模式
+- **索引数据库**: `~/.local/XlsxSearcher/index.db`
+- **本地偏好**: 通过 `QSettings` 存储（macOS: `~/Library/Preferences/`）
 
 ## 许可证
 

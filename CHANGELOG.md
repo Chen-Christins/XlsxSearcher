@@ -2,7 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.2.0] - 2026-05-20
+
+## What's Changed
+
+### Added
+- 新增**单元格内容搜索**，支持搜索所有 sheet 内的实际数据值（需先点击「深度索引」提取内容）
+- 新增**深度索引**功能，后台提取所有 sheet 的单元格文本并入库，进度条实时反馈
+- 新增**Sheet 预览面板**，选中搜索结果即时显示前 20 行数据，无需打开 Excel
+- 新增**预览面板折叠/展开**，支持点击按钮或 `Ctrl+`` 快捷键切换
+- 新增 **.xls 格式支持**，除 .xlsx/.xlsm 外也支持旧版 Excel 格式
+- 新增**应用图标**，Windows/macOS/Linux 三平台适配
+
+### Improved
+- 搜索栏重组为两行布局，新增「单元格」输入框，搜索入口更清晰
+- 结果区域改为可拖动分隔条，上方结果树 + 下方预览面板
+- 搜索历史支持单元格搜索条件持久化
+- macOS .app 打包修复，图标正确嵌入 Bundle
+
+## [1.1.0] - 2026-05-14
+
+## What's Changed
 
 ### Added
 - 新增搜索匹配模式切换，支持模糊匹配、前缀匹配和精确匹配
@@ -18,7 +38,12 @@ All notable changes to this project will be documented in this file.
 - 启动时会恢复上次使用的匹配模式、排序方式和结果视图
 - 目录显示补充完整路径提示，便于查看截断后的实际路径
 
-## [1.0.1] - 2026-04-02
+### Changed
+  - 统一数据库路径为 ~/.local/XlsxSearcher/index.db（所有平台）
+
+## [1.0.0] - 2026-04-02
+
+## What's Changed
 
 ### Added
 - 新增扫描目录功能，支持递归扫描 xlsx/xlsm 文件

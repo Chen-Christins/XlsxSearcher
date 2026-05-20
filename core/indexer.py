@@ -42,6 +42,13 @@ class IndexManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_filepath ON xlsx_files(filepath)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sheet_name ON sheets(sheet_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_id ON sheets(file_id)')
+
+        # Migration: add cell_text column for cell content search
+        cursor.execute("PRAGMA table_info(sheets)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'cell_text' not in columns:
+            cursor.execute('ALTER TABLE sheets ADD COLUMN cell_text TEXT')
+
         conn.commit()
         conn.close()
 
@@ -54,8 +61,9 @@ class IndexManager:
         conn.close()
         return result  # (id, modified_time) or None
 
-    def add_file(self, filename: str, filepath: str, modified_time: float, sheet_names: List[str]):
-        """添加文件及其子表到索引"""
+    def add_file(self, filename: str, filepath: str, modified_time: float,
+                 sheet_names: List[str], cell_texts: List[str] = None):
+        """添加文件及其子表到索引，可选附带单元格内容"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -81,8 +89,12 @@ class IndexManager:
             file_id = cursor.lastrowid
 
         # 插入子表信息
-        for sheet_name in sheet_names:
-            cursor.execute('INSERT INTO sheets (file_id, sheet_name) VALUES (?, ?)', (file_id, sheet_name))
+        for i, sheet_name in enumerate(sheet_names):
+            cell_text = cell_texts[i] if cell_texts and i < len(cell_texts) else None
+            cursor.execute(
+                'INSERT INTO sheets (file_id, sheet_name, cell_text) VALUES (?, ?, ?)',
+                (file_id, sheet_name, cell_text)
+            )
         conn.commit()
         conn.close()
 
@@ -123,6 +135,7 @@ class IndexManager:
         self,
         sheet_keyword: str = None,
         filename_keyword: str = None,
+        cell_keyword: str = None,
         match_mode: str = 'fuzzy'
     ) -> List[Dict]:
         conn = sqlite3.connect(self.db_path)
@@ -143,6 +156,11 @@ class IndexManager:
 
         if sheet_keyword:
             clause, value = self._build_match_clause('s.sheet_name', sheet_keyword, match_mode)
+            conditions.append(clause)
+            params.append(value)
+
+        if cell_keyword:
+            clause, value = self._build_match_clause('s.cell_text', cell_keyword, match_mode)
             conditions.append(clause)
             params.append(value)
 
@@ -189,12 +207,50 @@ class IndexManager:
         self,
         sheet_keyword: str = None,
         filename_keyword: str = None,
+        cell_keyword: str = None,
         match_mode: str = 'fuzzy'
     ) -> List[Dict]:
         """综合搜索"""
-        if not sheet_keyword and not filename_keyword:
+        if not sheet_keyword and not filename_keyword and not cell_keyword:
             return []
-        return self._fetch_grouped_results(sheet_keyword, filename_keyword, match_mode)
+        return self._fetch_grouped_results(
+            sheet_keyword=sheet_keyword,
+            filename_keyword=filename_keyword,
+            cell_keyword=cell_keyword,
+            match_mode=match_mode
+        )
+
+    def get_sheets_without_cell_text(self) -> List[Dict]:
+        """获取 cell_text 为 NULL 的 sheet 列表，用于深度索引"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT f.filepath, s.sheet_name, s.id
+            FROM sheets s
+            JOIN xlsx_files f ON s.file_id = f.id
+            WHERE s.cell_text IS NULL
+        ''')
+        rows = cursor.fetchall()
+        conn.close()
+        return [{'filepath': r[0], 'sheet_name': r[1], 'sheet_id': r[2]} for r in rows]
+
+    def update_sheet_cell_text(self, sheet_id: int, cell_text: str):
+        """更新单个 sheet 的 cell_text"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE sheets SET cell_text = ? WHERE id = ?', (cell_text, sheet_id))
+        conn.commit()
+        conn.close()
+
+    def update_sheet_cell_texts_batch(self, updates: List[Tuple[int, str]]):
+        """批量更新 sheet 的 cell_text（单事务，一次连接）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('BEGIN')
+        for sheet_id, cell_text in updates:
+            cursor.execute('UPDATE sheets SET cell_text = ? WHERE id = ?', (cell_text, sheet_id))
+        conn.commit()
+        conn.close()
 
     def clear_index(self):
         """清空所有索引"""

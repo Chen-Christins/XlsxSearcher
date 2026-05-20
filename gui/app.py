@@ -6,9 +6,11 @@ import sys
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
-    QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox
+    QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox,
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt5.QtGui import QIcon
 
 from core.indexer import IndexManager
 from core.scanner import XlsxScanner
@@ -40,6 +42,70 @@ class ScanWorker(QThread):
             )
             duration = time.time() - start_time
             self.finished.emit(added, updated, deleted, duration)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class DeepIndexWorker(QThread):
+    """深度索引工作线程 — 并行提取所有未索引 sheet 的单元格内容"""
+    finished = pyqtSignal(int, int, float)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int)
+
+    def __init__(self, index_manager, scanner):
+        super().__init__()
+        self.index_manager = index_manager
+        self.scanner = scanner
+
+    def run(self):
+        import time
+        from collections import defaultdict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        start = time.time()
+        try:
+            pending = self.index_manager.get_sheets_without_cell_text()
+            total = len(pending)
+            if total == 0:
+                self.finished.emit(0, 0, 0.0)
+                return
+
+            # 按文件分组
+            by_file = defaultdict(list)
+            for entry in pending:
+                by_file[entry['filepath']].append(entry)
+
+            # 并行处理：4 线程并发，每个文件独立打开 openpyxl
+            max_workers = min(4, len(by_file))
+            processed = 0
+
+            # 每个线程用自己的 scanner 实例（避免 openpyxl 线程竞争）
+            from core.scanner import XlsxScanner as ScannerCls
+
+            def _extract(fp, names, ids):
+                s = ScannerCls()
+                texts = s.extract_cell_texts(fp, names)
+                return [(sid, text) for sid, text in zip(ids, texts) if text]
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for filepath, entries in by_file.items():
+                    sheet_names = [e['sheet_name'] for e in entries]
+                    sheet_ids = [e['sheet_id'] for e in entries]
+                    future = executor.submit(_extract, filepath, sheet_names, sheet_ids)
+                    futures[future] = (filepath, len(entries))
+
+                for future in as_completed(futures):
+                    filepath, count = futures[future]
+                    try:
+                        updates = future.result()
+                        if updates:
+                            self.index_manager.update_sheet_cell_texts_batch(updates)
+                    except Exception as e:
+                        print(f"警告: 深度索引文件失败 {filepath}: {e}")
+                    processed += count
+                    self.progress.emit(processed, total)
+
+            self.finished.emit(processed, total, time.time() - start)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -77,6 +143,10 @@ class XlsxSearcherApp(QMainWindow):
         self.setMinimumSize(1000, 700)
         self.resize(1000, 700)
 
+        icon_path = _get_icon_path()
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         # 中心部件
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -98,38 +168,57 @@ class XlsxSearcherApp(QMainWindow):
         top_layout.addWidget(QPushButton("选择目录", clicked=self._select_directory))
         top_layout.addWidget(QPushButton("重新扫描", clicked=self._rescan))
         top_layout.addWidget(QPushButton("清空索引", clicked=self._clear_index))
+        self.btn_deep_index = QPushButton("深度索引")
+        self.btn_deep_index.clicked.connect(self._start_deep_index)
+        self.btn_deep_index.setToolTip("提取所有文件的单元格内容以支持单元格搜索")
+        top_layout.addWidget(self.btn_deep_index)
 
-        # 搜索区域
+        # 搜索区域（两行）
         search_widget = QWidget()
-        search_layout = QHBoxLayout(search_widget)
-        search_layout.setContentsMargins(10, 5, 10, 10)
+        search_outer = QVBoxLayout(search_widget)
+        search_outer.setContentsMargins(10, 5, 10, 10)
+        search_outer.setSpacing(4)
         main_layout.addWidget(search_widget)
 
-        # 子表名称搜索
+        # Row 1: 搜索输入（stretch 全给输入框，label 紧贴）
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
         self.sheet_entry = QLineEdit()
         self.sheet_entry.setPlaceholderText("子表名称")
         self.sheet_entry.textChanged.connect(self._do_search)
         self.sheet_entry.returnPressed.connect(self._on_search_committed)
         self.sheet_entry.editingFinished.connect(self._on_search_committed)
-        search_layout.addWidget(QLabel("子表名称:"))
-        search_layout.addWidget(self.sheet_entry)
+        row1.addWidget(QLabel("子表名称:"))
+        row1.addWidget(self.sheet_entry, 1)
 
-        # 文件名搜索
         self.filename_entry = QLineEdit()
         self.filename_entry.setPlaceholderText("文件名")
         self.filename_entry.textChanged.connect(self._do_search)
         self.filename_entry.returnPressed.connect(self._on_search_committed)
         self.filename_entry.editingFinished.connect(self._on_search_committed)
-        search_layout.addWidget(QLabel("文件名:"))
-        search_layout.addWidget(self.filename_entry)
+        row1.addWidget(QLabel("文件名:"))
+        row1.addWidget(self.filename_entry, 1)
 
+        self.cell_entry = QLineEdit()
+        self.cell_entry.setPlaceholderText("单元格内容")
+        self.cell_entry.textChanged.connect(self._do_search)
+        self.cell_entry.returnPressed.connect(self._on_search_committed)
+        self.cell_entry.editingFinished.connect(self._on_search_committed)
+        row1.addWidget(QLabel("单元格:"))
+        row1.addWidget(self.cell_entry, 1)
+
+        search_outer.addLayout(row1)
+
+        # Row 2: 匹配/排序/视图/历史（stretch 全给下拉框）
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
         self.match_mode_combo = QComboBox()
         self.match_mode_combo.addItem("模糊匹配", 'fuzzy')
         self.match_mode_combo.addItem("前缀匹配", 'prefix')
         self.match_mode_combo.addItem("精确匹配", 'exact')
         self.match_mode_combo.currentIndexChanged.connect(self._do_search)
-        search_layout.addWidget(QLabel("匹配:"))
-        search_layout.addWidget(self.match_mode_combo)
+        row2.addWidget(QLabel("匹配:"))
+        row2.addWidget(self.match_mode_combo, 1)
 
         self.sort_mode_combo = QComboBox()
         self.sort_mode_combo.addItem("文件名 A-Z", 'filename_asc')
@@ -137,28 +226,33 @@ class XlsxSearcherApp(QMainWindow):
         self.sort_mode_combo.addItem("子表数最多", 'sheet_count_desc')
         self.sort_mode_combo.addItem("子表数最少", 'sheet_count_asc')
         self.sort_mode_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
-        search_layout.addWidget(QLabel("排序:"))
-        search_layout.addWidget(self.sort_mode_combo)
+        row2.addWidget(QLabel("排序:"))
+        row2.addWidget(self.sort_mode_combo, 1)
 
         self.view_mode_combo = QComboBox()
         self.view_mode_combo.addItem("分组视图", 'grouped')
         self.view_mode_combo.addItem("列表视图", 'flat')
         self.view_mode_combo.currentIndexChanged.connect(self._on_view_mode_changed)
-        search_layout.addWidget(QLabel("视图:"))
-        search_layout.addWidget(self.view_mode_combo)
+        row2.addWidget(QLabel("视图:"))
+        row2.addWidget(self.view_mode_combo, 1)
 
         self.history_combo = QComboBox()
         self.history_combo.setMinimumWidth(220)
         self.history_combo.addItem("最近搜索")
         self.history_combo.currentIndexChanged.connect(self._on_history_selected)
-        search_layout.addWidget(self.history_combo)
+        row2.addWidget(self.history_combo, 1)
+
+        search_outer.addLayout(row2)
 
         # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
 
-        # 结果列表
+        # 结果区域（上：结果树 / 下：预览面板）
+        self.splitter = QSplitter(Qt.Vertical)
+
+        # 结果树
         self.result_tree = QTreeWidget()
         self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
         self.result_tree.setColumnWidth(0, 280)
@@ -171,7 +265,38 @@ class XlsxSearcherApp(QMainWindow):
         self.result_tree.itemClicked.connect(self._on_select)
         self.result_tree.itemDoubleClicked.connect(self._open_file)
 
-        main_layout.addWidget(self.result_tree)
+        self.splitter.addWidget(self.result_tree)
+
+        # 预览面板
+        self.preview_container = QWidget()
+        preview_layout = QVBoxLayout(self.preview_container)
+        preview_layout.setContentsMargins(0, 4, 0, 0)
+        preview_layout.setSpacing(2)
+
+        self.preview_label = QLabel("预览: 请选择一个结果项")
+        preview_layout.addWidget(self.preview_label)
+
+        self.preview_table = QTableWidget()
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.verticalHeader().setVisible(True)
+        preview_layout.addWidget(self.preview_table)
+
+        self.splitter.addWidget(self.preview_container)
+        self.preview_visible = True
+        self._saved_splitter_sizes = None
+
+        # 预览面板折叠按钮
+        self.btn_toggle_preview = QPushButton("▾ 折叠预览")
+        self.btn_toggle_preview.setFixedWidth(120)
+        self.btn_toggle_preview.clicked.connect(self._toggle_preview)
+        preview_layout.insertWidget(0, self.btn_toggle_preview)
+
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+
+        main_layout.addWidget(self.splitter)
 
         # 底部操作按钮 + 右侧加载条
         bottom_widget = QWidget()
@@ -208,6 +333,34 @@ class XlsxSearcherApp(QMainWindow):
         self.scan_progress.setVisible(False)
         bottom_layout.addSpacing(12)
         bottom_layout.addWidget(self.scan_progress)
+
+    def _toggle_preview(self):
+        """折叠/展开预览面板"""
+        if self.preview_visible:
+            self._saved_splitter_sizes = self.splitter.sizes()
+            self.preview_container.hide()
+            self.preview_visible = False
+            self.btn_toggle_preview.setText("▸ 展开预览")
+            self.status_bar.showMessage("预览面板已折叠")
+        else:
+            self.preview_container.show()
+            self.preview_visible = True
+            if self._saved_splitter_sizes:
+                self.splitter.setSizes(self._saved_splitter_sizes)
+            self.btn_toggle_preview.setText("▾ 折叠预览")
+            self.status_bar.showMessage("预览面板已展开", 2000)
+
+    def keyPressEvent(self, event):
+        """捕获 Ctrl+` / Cmd+` 折叠/展开预览"""
+        key = event.key()
+        mods = event.modifiers()
+        is_ctrl = mods & Qt.CTRL
+        is_cmd = mods & Qt.META
+        # backtick: QuoteLeft (0x60), also check AsciiTilde on some layouts
+        if (is_ctrl or is_cmd) and key in (Qt.Key_QuoteLeft, Qt.Key_AsciiTilde):
+            self._toggle_preview()
+            return
+        super().keyPressEvent(event)
 
     def _check_existing_index(self):
         """检查是否存在已保存的扫描目录（可选显示）"""
@@ -281,7 +434,7 @@ class XlsxSearcherApp(QMainWindow):
         self.search_history = [
             item for item in history
             if isinstance(item, dict)
-            and (item.get('sheet_keyword') or item.get('filename_keyword'))
+            and (item.get('sheet_keyword') or item.get('filename_keyword') or item.get('cell_keyword'))
         ][:self.MAX_SEARCH_HISTORY]
         self._refresh_history_combo()
 
@@ -308,6 +461,8 @@ class XlsxSearcherApp(QMainWindow):
             parts.append(f"子表:{item['sheet_keyword']}")
         if item.get('filename_keyword'):
             parts.append(f"文件:{item['filename_keyword']}")
+        if item.get('cell_keyword'):
+            parts.append(f"单元格:{item['cell_keyword']}")
         parts.append(self._match_mode_label(item.get('match_mode', 'fuzzy')))
         return ' | '.join(parts)
 
@@ -320,14 +475,15 @@ class XlsxSearcherApp(QMainWindow):
         }
         return mapping.get(match_mode, '模糊')
 
-    def _record_search_history(self, sheet_keyword, filename_keyword, match_mode):
+    def _record_search_history(self, sheet_keyword, filename_keyword, cell_keyword, match_mode):
         """记录最近搜索，避免输入过程中产生大量噪音"""
-        if not sheet_keyword and not filename_keyword:
+        if not sheet_keyword and not filename_keyword and not cell_keyword:
             return
 
         entry = {
             'sheet_keyword': sheet_keyword,
             'filename_keyword': filename_keyword,
+            'cell_keyword': cell_keyword,
             'match_mode': match_mode
         }
         self.search_history = [item for item in self.search_history if item != entry]
@@ -410,6 +566,36 @@ class XlsxSearcherApp(QMainWindow):
         self.status_bar.showMessage("扫描出错")
         QMessageBox.critical(self, "错误", f"扫描失败: {error_msg}")
 
+    def _start_deep_index(self):
+        """启动深度索引（提取单元格内容）"""
+        if self.is_scanning:
+            return
+        self.is_scanning = True
+        self.status_bar.showMessage("正在提取单元格内容...")
+        self.scan_progress.setVisible(True)
+        self.scan_progress.setRange(0, 0)
+
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export]:
+            btn.setEnabled(False)
+
+        self.deep_worker = DeepIndexWorker(self.index_manager, self.scanner)
+        self.deep_worker.finished.connect(self._on_deep_index_complete)
+        self.deep_worker.error.connect(self._on_scan_error)
+        self.deep_worker.progress.connect(self._on_scan_progress)
+        self.deep_worker.start()
+
+    def _on_deep_index_complete(self, processed, total, duration):
+        """深度索引完成回调"""
+        self.is_scanning = False
+        self.scan_progress.setVisible(False)
+        if total == 0:
+            self.status_bar.showMessage("所有文件已完成深度索引")
+        else:
+            self.status_bar.showMessage(
+                f"深度索引完成：已处理 {processed}/{total} 个子表，耗时 {duration:.1f}秒"
+            )
+        self._do_search()
+
     def _clear_index(self):
         """清空索引"""
         reply = QMessageBox.question(
@@ -425,13 +611,16 @@ class XlsxSearcherApp(QMainWindow):
         """执行搜索"""
         sheet_keyword = self.sheet_entry.text().strip()
         filename_keyword = self.filename_entry.text().strip()
+        cell_keyword = self.cell_entry.text().strip()
         match_mode = self.match_mode_combo.currentData()
         self._save_ui_preferences()
 
-        if not sheet_keyword and not filename_keyword:
+        if not sheet_keyword and not filename_keyword and not cell_keyword:
             self.search_results = self.index_manager.get_all_files_with_sheets()
         else:
-            self.search_results = self.searcher.search(sheet_keyword, filename_keyword, match_mode)
+            self.search_results = self.searcher.search(
+                sheet_keyword, filename_keyword, cell_keyword, match_mode
+            )
 
         self._sort_results()
         self._update_results()
@@ -440,12 +629,19 @@ class XlsxSearcherApp(QMainWindow):
         """仅在用户明确完成输入后写入搜索历史"""
         sheet_keyword = self.sheet_entry.text().strip()
         filename_keyword = self.filename_entry.text().strip()
+        cell_keyword = self.cell_entry.text().strip()
         match_mode = self.match_mode_combo.currentData()
-        self._record_search_history(sheet_keyword, filename_keyword, match_mode)
+        self._record_search_history(sheet_keyword, filename_keyword, cell_keyword, match_mode)
 
     def _update_results(self):
         """更新搜索结果表格"""
         self.result_tree.clear()
+        # 清空预览
+        self.preview_label.setText("预览: 请选择一个结果项")
+        self.preview_table.clear()
+        self.preview_table.setRowCount(0)
+        self.preview_table.setColumnCount(0)
+
         for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
             btn.setEnabled(False)
         self.btn_export.setEnabled(bool(self.search_results))
@@ -519,6 +715,78 @@ class XlsxSearcherApp(QMainWindow):
         self.btn_locate.setEnabled(True)
         self.btn_copy.setEnabled(True)
 
+        # 确定 filepath 和 sheet_name，触发预览
+        filepath = item.data(0, Qt.UserRole)
+        item_type = item.data(0, Qt.UserRole + 1)
+
+        if item_type == 'sheet':
+            sheet_name = item.text(0)
+        elif item_type == 'file':
+            # 顶级文件项：取该文件第一个匹配的子表
+            for result in self.search_results:
+                if result['filepath'] == filepath:
+                    sheets = result.get('sheet_names', [])
+                    sheet_name = sheets[0] if sheets else ''
+                    break
+            else:
+                sheet_name = ''
+        elif item_type == 'flat':
+            sheet_name = item.text(1)
+        else:
+            sheet_name = ''
+
+        if filepath and sheet_name:
+            self._update_preview(filepath, sheet_name)
+
+    def _update_preview(self, filepath, sheet_name):
+        """加载预览面板：读取 sheet 前 20 行数据并填充表格"""
+        if not filepath or not os.path.exists(filepath):
+            self.preview_label.setText(f"预览: 文件不存在或已被移动")
+            self.preview_table.clear()
+            self.preview_table.setRowCount(0)
+            self.preview_table.setColumnCount(0)
+            return
+
+        self.preview_label.setText(f"预览: {sheet_name}  ({self._truncate_path(filepath, 80)})")
+        self.status_bar.showMessage("正在加载预览...")
+        QApplication.processEvents()
+
+        try:
+            data = self.scanner.read_sheet_preview(filepath, sheet_name, max_rows=20, max_cols=50)
+        except Exception as e:
+            self.preview_label.setText(f"预览: 读取失败 - {e}")
+            self.preview_table.clear()
+            self.preview_table.setRowCount(0)
+            self.preview_table.setColumnCount(0)
+            self.status_bar.showMessage("预览加载失败")
+            return
+
+        if not data:
+            self.preview_label.setText(f"预览: {sheet_name} (空表)")
+            self.preview_table.clear()
+            self.preview_table.setRowCount(0)
+            self.preview_table.setColumnCount(0)
+            self.status_bar.showMessage("就绪")
+            return
+
+        num_rows = len(data)
+        num_cols = max(len(row) for row in data) if data else 0
+
+        self.preview_table.setRowCount(num_rows)
+        self.preview_table.setColumnCount(num_cols)
+
+        from openpyxl.utils import get_column_letter
+        headers = [get_column_letter(i + 1) for i in range(num_cols)]
+        self.preview_table.setHorizontalHeaderLabels(headers)
+        self.preview_table.setVerticalHeaderLabels([str(i + 1) for i in range(num_rows)])
+
+        for r, row_data in enumerate(data):
+            for c, cell_val in enumerate(row_data):
+                self.preview_table.setItem(r, c, QTableWidgetItem(cell_val))
+
+        self.preview_table.resizeColumnsToContents()
+        self.status_bar.showMessage("就绪")
+
     def _get_selected_filepath(self):
         """获取选中的文件路径"""
         selected_items = self.result_tree.selectedItems()
@@ -550,14 +818,17 @@ class XlsxSearcherApp(QMainWindow):
 
         self.sheet_entry.blockSignals(True)
         self.filename_entry.blockSignals(True)
+        self.cell_entry.blockSignals(True)
         self.match_mode_combo.blockSignals(True)
 
         self.sheet_entry.setText(item.get('sheet_keyword', ''))
         self.filename_entry.setText(item.get('filename_keyword', ''))
+        self.cell_entry.setText(item.get('cell_keyword', ''))
         self._set_combo_by_data(self.match_mode_combo, item.get('match_mode', 'fuzzy'))
 
         self.sheet_entry.blockSignals(False)
         self.filename_entry.blockSignals(False)
+        self.cell_entry.blockSignals(False)
         self.match_mode_combo.blockSignals(False)
 
         self.history_combo.setCurrentIndex(0)
@@ -589,6 +860,13 @@ class XlsxSearcherApp(QMainWindow):
             return
         view_label = '分组视图' if self.current_view_mode == 'grouped' else '列表视图'
         summary = f"{view_label}：找到 {file_count} 个文件，{matched_sheet_count} 个子表命中"
+
+        cell_keyword = self.cell_entry.text().strip() if hasattr(self, 'cell_entry') else ''
+        if cell_keyword and file_count == 0:
+            pending = self.index_manager.get_sheets_without_cell_text()
+            if pending:
+                summary += " | 提示：需先点击'深度索引'提取单元格内容"
+
         if prefix:
             self.status_bar.showMessage(f"{prefix}；{summary}")
             return
@@ -683,9 +961,23 @@ class XlsxSearcherApp(QMainWindow):
         self.show()
 
 
+def _get_icon_path():
+    """获取图标文件路径，兼容开发环境和 PyInstaller 打包后的路径"""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, 'icons', 'app_icon.png')
+
+
 def run_app():
     """启动应用程序"""
     app = QApplication(sys.argv)
+
+    icon_path = _get_icon_path()
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+
     window = XlsxSearcherApp()
     window.show()
     sys.exit(app.exec_())

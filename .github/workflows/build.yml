@@ -41,17 +41,34 @@ jobs:
           pip install pyinstaller
 
       - name: Build with PyInstaller
+        shell: bash
         run: |
-          pyinstaller --onefile --windowed --name ${{ matrix.exe_name }} main.py
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            SEP=";"
+            ICON_FILE="icons/app_icon.ico"
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            SEP=":"
+            ICON_FILE="icons/app_icon.png"
+          else
+            SEP=":"
+            ICON_FILE="icons/app_icon.png"
+          fi
+          pyinstaller --onefile --windowed --name ${{ matrix.exe_name }} \
+            --icon "$ICON_FILE" \
+            --add-data "icons/app_icon.png${SEP}icons" \
+            main.py
 
       - name: Create artifact
         shell: bash
         run: |
           cd dist
-          # 创建 zip 包
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
             powershell -Command "Compress-Archive -Path ${{ matrix.exe_name }} -DestinationPath ${{ matrix.artifact_name }}.zip -Force"
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            # macOS .app is a directory bundle — must use -r and NOT use -j
+            zip -ry ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}.app
           else
+            # Linux single binary
             zip -j ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}
           fi
           ls -la
