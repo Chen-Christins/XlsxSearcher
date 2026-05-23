@@ -88,16 +88,34 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Extract changelog
+        id: changelog
+        run: |
+          # 提取 CHANGELOG.md 中最新一个版本的内容
+          # 从第一个 "## [x.y.z]" 开始，到下一个 "## [x.y.z]"（或文件末尾）结束
+          awk '
+            /^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {
+              if (!started) { started=1; print; next }
+              exit
+            }
+            started { print }
+          ' CHANGELOG.md > /tmp/release_body.md
+          echo "lines=$(wc -l < /tmp/release_body.md)"
+          cat /tmp/release_body.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          generate_release_notes: true
+          body_path: /tmp/release_body.md
           files: |
             artifacts/XlsxSearcher-macos/*.zip
             artifacts/XlsxSearcher-windows/*.zip

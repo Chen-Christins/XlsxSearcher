@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-05-24
+
+## What's Changed
+
+### Added
+- 新增 **Sheet 别名映射**功能，支持导入 bat/txt 映射脚本，可通过英文配置名搜索中文子表
+
+### Fixed
+- 修复 macOS 顶部菜单栏显示 "Python" 而非应用名的问题，通过 ObjC 运行时直接修改原生 NSMenu 标题
+- 修复 macOS 统一标题栏模式下窗口标题文字与控件重叠的问题
+
+### Improved
+- macOS 标题栏改为透明统一样式（类似微信 macOS 端），内容区延伸至标题栏区域，视觉上融为一体
+- 顶部工具栏支持拖拽移动窗口和双击最大化/恢复
+
 ## [1.2.0] - 2026-05-20
 
 ## What's Changed

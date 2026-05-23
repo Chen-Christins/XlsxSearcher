@@ -1,7 +1,7 @@
 """索引管理器 - 使用SQLite存储xlsx文件索引"""
-import sqlite3
 import os
-from typing import List, Dict, Tuple
+import sqlite3
+from typing import Dict, List, Tuple
 
 class IndexManager:
     def __init__(self, db_path: str = None):
@@ -37,11 +37,22 @@ class IndexManager:
                 FOREIGN KEY (file_id) REFERENCES xlsx_files(id) ON DELETE CASCADE
             )
         ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sheet_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alias_name TEXT NOT NULL,
+                sheet_name TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                UNIQUE(alias_name, sheet_name, source_path)
+            )
+        ''')
         # 创建索引
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_filename ON xlsx_files(filename)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_filepath ON xlsx_files(filepath)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_sheet_name ON sheets(sheet_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_file_id ON sheets(file_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_alias_name ON sheet_aliases(alias_name)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_alias_sheet_name ON sheet_aliases(sheet_name)')
 
         # Migration: add cell_text column for cell content search
         cursor.execute("PRAGMA table_info(sheets)")
@@ -131,9 +142,54 @@ class IndexManager:
             return f"{field_name} LIKE ? COLLATE NOCASE", f'{keyword}%'
         return f"{field_name} LIKE ? COLLATE NOCASE", f'%{keyword}%'
 
+    def replace_sheet_aliases(self, source_path: str, mappings: List[Tuple[str, str]]) -> int:
+        """替换同一来源文件导入的子表别名映射。"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM sheet_aliases WHERE source_path = ?', (source_path,))
+        inserted = 0
+        if mappings:
+            cursor.executemany(
+                'INSERT OR IGNORE INTO sheet_aliases (alias_name, sheet_name, source_path) VALUES (?, ?, ?)',
+                [(alias_name, sheet_name, source_path) for alias_name, sheet_name in mappings]
+            )
+            cursor.execute('SELECT COUNT(*) FROM sheet_aliases WHERE source_path = ?', (source_path,))
+            inserted = cursor.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return inserted
+
+    def resolve_sheet_aliases(self, keyword: str, match_mode: str = 'fuzzy') -> List[str]:
+        """根据英文别名查询对应的子表名。"""
+        if not keyword:
+            return []
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        clause, value = self._build_match_clause('alias_name', keyword, match_mode)
+        cursor.execute(
+            f'SELECT DISTINCT sheet_name FROM sheet_aliases WHERE {clause} ORDER BY LOWER(sheet_name)',
+            (value,)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def get_sheet_alias_stats(self) -> Dict:
+        """获取已导入别名统计。"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(DISTINCT alias_name), COUNT(*) FROM sheet_aliases')
+        row = cursor.fetchone()
+        conn.close()
+        return {
+            'alias_count': row[0] if row else 0,
+            'mapping_count': row[1] if row else 0,
+        }
+
     def _fetch_grouped_results(
         self,
-        sheet_keyword: str = None,
+        sheet_keywords: List[str] = None,
         filename_keyword: str = None,
         cell_keyword: str = None,
         match_mode: str = 'fuzzy'
@@ -142,7 +198,7 @@ class IndexManager:
         cursor = conn.cursor()
 
         query = [
-            'SELECT f.filename, f.filepath, s.sheet_name',
+            'SELECT DISTINCT f.filename, f.filepath, s.sheet_name',
             'FROM xlsx_files f',
             'LEFT JOIN sheets s ON f.id = s.file_id'
         ]
@@ -154,10 +210,22 @@ class IndexManager:
             conditions.append(clause)
             params.append(value)
 
-        if sheet_keyword:
-            clause, value = self._build_match_clause('s.sheet_name', sheet_keyword, match_mode)
-            conditions.append(clause)
-            params.append(value)
+        if sheet_keywords:
+            sheet_conditions = []
+            seen_keywords = set()
+            for sheet_keyword in sheet_keywords:
+                normalized_keyword = (sheet_keyword or '').strip()
+                if not normalized_keyword:
+                    continue
+                dedupe_key = normalized_keyword.lower()
+                if dedupe_key in seen_keywords:
+                    continue
+                seen_keywords.add(dedupe_key)
+                clause, value = self._build_match_clause('s.sheet_name', normalized_keyword, match_mode)
+                sheet_conditions.append(clause)
+                params.append(value)
+            if sheet_conditions:
+                conditions.append('(' + ' OR '.join(sheet_conditions) + ')')
 
         if cell_keyword:
             clause, value = self._build_match_clause('s.cell_text', cell_keyword, match_mode)
@@ -197,7 +265,7 @@ class IndexManager:
 
     def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
         """按子表名称搜索"""
-        return self._fetch_grouped_results(sheet_keyword=keyword, match_mode=match_mode)
+        return self._fetch_grouped_results(sheet_keywords=[keyword], match_mode=match_mode)
 
     def search_by_filename(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
         """按文件名搜索"""
@@ -205,16 +273,16 @@ class IndexManager:
 
     def search(
         self,
-        sheet_keyword: str = None,
+        sheet_keywords: List[str] = None,
         filename_keyword: str = None,
         cell_keyword: str = None,
         match_mode: str = 'fuzzy'
     ) -> List[Dict]:
         """综合搜索"""
-        if not sheet_keyword and not filename_keyword and not cell_keyword:
+        if not sheet_keywords and not filename_keyword and not cell_keyword:
             return []
         return self._fetch_grouped_results(
-            sheet_keyword=sheet_keyword,
+            sheet_keywords=sheet_keywords,
             filename_keyword=filename_keyword,
             cell_keyword=cell_keyword,
             match_mode=match_mode

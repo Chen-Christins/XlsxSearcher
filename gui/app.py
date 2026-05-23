@@ -9,10 +9,11 @@ from PyQt5.QtWidgets import (
     QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox,
     QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QIcon
 
 from core.indexer import IndexManager
+from core.alias_parser import parse_sheet_alias_file
 from core.scanner import XlsxScanner
 from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
@@ -143,6 +144,10 @@ class XlsxSearcherApp(QMainWindow):
         self.setMinimumSize(1000, 700)
         self.resize(1000, 700)
 
+        # macOS 统一标题栏样式
+        if sys.platform == 'darwin':
+            self.setUnifiedTitleAndToolBarOnMac(True)
+
         icon_path = _get_icon_path()
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -151,13 +156,14 @@ class XlsxSearcherApp(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(10, 10, 10, 0)
+        main_layout.setContentsMargins(10, 0, 10, 0)
         main_layout.setSpacing(4)
 
         # 顶部搜索区域
         top_widget = QWidget()
+        top_widget.installEventFilter(self)  # 用于 macOS 窗口拖拽
         top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(10, 10, 10, 5)
+        top_layout.setContentsMargins(80, 20, 10, 5)
         main_layout.addWidget(top_widget)
 
         # 目录选择和显示
@@ -172,6 +178,10 @@ class XlsxSearcherApp(QMainWindow):
         self.btn_deep_index.clicked.connect(self._start_deep_index)
         self.btn_deep_index.setToolTip("提取所有文件的单元格内容以支持单元格搜索")
         top_layout.addWidget(self.btn_deep_index)
+        self.btn_import_aliases = QPushButton("导入映射")
+        self.btn_import_aliases.clicked.connect(self._import_sheet_aliases)
+        self.btn_import_aliases.setToolTip("导入 bat/txt 映射脚本，支持英文名搜索中文子表")
+        top_layout.addWidget(self.btn_import_aliases)
 
         # 搜索区域（两行）
         search_widget = QWidget()
@@ -184,7 +194,7 @@ class XlsxSearcherApp(QMainWindow):
         row1 = QHBoxLayout()
         row1.setSpacing(6)
         self.sheet_entry = QLineEdit()
-        self.sheet_entry.setPlaceholderText("子表名称")
+        self.sheet_entry.setPlaceholderText("子表名称或英文配置名")
         self.sheet_entry.textChanged.connect(self._do_search)
         self.sheet_entry.returnPressed.connect(self._on_search_committed)
         self.sheet_entry.editingFinished.connect(self._on_search_committed)
@@ -422,6 +432,45 @@ class XlsxSearcherApp(QMainWindow):
         """保存当前扫描目录"""
         if self.scan_directory:
             self.settings.setValue('scan/last_directory', self.scan_directory)
+
+    def _import_sheet_aliases(self):
+        """导入英文配置名到子表名的映射文件。"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            '选择映射文件',
+            self.scan_directory or os.path.expanduser('~'),
+            'Mapping Files (*.bat *.cmd *.txt);;All Files (*)'
+        )
+        if not file_path:
+            return
+
+        try:
+            mappings = parse_sheet_alias_file(file_path)
+            if not mappings:
+                QMessageBox.warning(
+                    self,
+                    '提示',
+                    '未在该文件中解析到有效映射。\n支持格式示例:\ncall do_conv.bat TextConfig 界面文本'
+                )
+                return
+
+            imported_count = self.index_manager.replace_sheet_aliases(file_path, mappings)
+            stats = self.index_manager.get_sheet_alias_stats()
+            self.status_bar.showMessage(
+                f"已导入映射：{imported_count} 条，当前共 {stats['alias_count']} 个英文名 / {stats['mapping_count']} 条映射"
+            )
+            QMessageBox.information(
+                self,
+                '导入成功',
+                f'已从以下文件导入映射:\n{file_path}\n\n'
+                f'本次导入 {imported_count} 条映射。\n'
+                f'现在可以直接用英文配置名搜索对应子表。'
+            )
+            self._do_search()
+        except UnicodeDecodeError:
+            QMessageBox.critical(self, '错误', '文件编码无法识别，请先保存为 UTF-8 编码后再导入')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导入映射失败: {e}')
 
     def _restore_search_history(self):
         """恢复最近搜索历史"""
@@ -956,6 +1005,27 @@ class XlsxSearcherApp(QMainWindow):
             return path
         return "..." + path[-max_length:]
 
+    def eventFilter(self, obj, event):
+        """顶部区域拖拽窗口 + 双击放大（macOS 统一标题栏）"""
+        if sys.platform != 'darwin':
+            return super().eventFilter(obj, event)
+
+        if event.type() == event.MouseButtonDblClick:
+            if self.isMaximized():
+                self.showNormal()
+            else:
+                self.showMaximized()
+            return True
+
+        if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
+            try:
+                self.windowHandle().startSystemMove()
+                return True
+            except Exception:
+                pass
+
+        return super().eventFilter(obj, event)
+
     def run(self):
         """运行应用"""
         self.show()
@@ -970,8 +1040,169 @@ def _get_icon_path():
     return os.path.join(base_path, 'icons', 'app_icon.png')
 
 
+def _fix_macos_cfbundle_name():
+    """在 QApplication 创建前修改 CFBundleName，防止 Qt 读取到 'Python'"""
+    if sys.platform != 'darwin':
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def msg(restype, *argtypes):
+            objc.objc_msgSend.restype = restype
+            objc.objc_msgSend.argtypes = list(argtypes)
+            return objc.objc_msgSend
+
+        # 获取 NSBundle.mainBundle
+        NSBundle = objc.objc_getClass(b'NSBundle')
+        sel_main = objc.sel_registerName(b'mainBundle')
+        bundle = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(NSBundle, sel_main)
+
+        # 获取 infoDictionary
+        sel_info = objc.sel_registerName(b'infoDictionary')
+        info = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(bundle, sel_info)
+        if not info:
+            return
+
+        # 造 NSString
+        NSString = objc.objc_getClass(b'NSString')
+        sel_str = objc.sel_registerName(b'stringWithUTF8String:')
+        key = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(
+            NSString, sel_str, b'CFBundleName'
+        )
+        val = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(
+            NSString, sel_str, b'XlsxSearcher'
+        )
+
+        # 尝试通过 setValue:forKey: 直接修改 info dict（可能 immutable 则静默失败）
+        sel_setValue = objc.sel_registerName(b'setValue:forKey:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(
+            info, sel_setValue, val, key
+        )
+    except Exception:
+        pass
+
+
+def _apply_macos_unified_titlebar(window):
+    """将 macOS 标题栏设置为透明统一样式（类似微信 macOS 端）"""
+    if sys.platform != 'darwin':
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def msg(restype, *argtypes):
+            objc.objc_msgSend.restype = restype
+            objc.objc_msgSend.argtypes = list(argtypes)
+            return objc.objc_msgSend
+
+        # winId() -> NSView* -> [view window] -> NSWindow*
+        view_ptr = int(window.winId())
+        view = ctypes.c_void_p(view_ptr)
+        sel_window = objc.sel_registerName(b'window')
+        ns_window = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(view, sel_window)
+        if not ns_window:
+            return
+
+        # 1. titlebarAppearsTransparent = YES
+        sel_transparent = objc.sel_registerName(b'setTitlebarAppearsTransparent:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_byte)(ns_window, sel_transparent, True)
+
+        # 2. styleMask |= NSWindowStyleMaskFullSizeContentView (1 << 15)
+        sel_styleMask = objc.sel_registerName(b'styleMask')
+        current_mask = msg(ctypes.c_ulong, ctypes.c_void_p, ctypes.c_void_p)(ns_window, sel_styleMask)
+        NSWindowStyleMaskFullSizeContentView = 1 << 15
+        sel_setStyleMask = objc.sel_registerName(b'setStyleMask:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong)(
+            ns_window, sel_setStyleMask, current_mask | NSWindowStyleMaskFullSizeContentView
+        )
+
+        # 3. movableByWindowBackground = YES (允许从内容区拖拽窗口)
+        sel_movable = objc.sel_registerName(b'setMovableByWindowBackground:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_byte)(ns_window, sel_movable, True)
+
+        # 4. 隐藏原生标题文字，避免与控件重叠
+        # NSWindowTitleHidden = 1
+        sel_setTitleVisibility = objc.sel_registerName(b'setTitleVisibility:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)(ns_window, sel_setTitleVisibility, 1)
+
+    except Exception:
+        pass
+
+
+def _fix_macos_app_title(retry=0):
+    """重命名 NSApplication 主菜单中的 App 菜单标题"""
+    if sys.platform != 'darwin':
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.cdll.LoadLibrary(ctypes.util.find_library('objc'))
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+
+        def msg(restype, *argtypes):
+            objc.objc_msgSend.restype = restype
+            objc.objc_msgSend.argtypes = list(argtypes)
+            return objc.objc_msgSend
+
+        NSApp_cls = objc.objc_getClass(b'NSApplication')
+        sel_shared = objc.sel_registerName(b'sharedApplication')
+        shared = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(NSApp_cls, sel_shared)
+
+        sel_mainMenu = objc.sel_registerName(b'mainMenu')
+        main_menu = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(shared, sel_mainMenu)
+
+        # 菜单可能还没创建好，重试
+        if not main_menu:
+            if retry < 10:
+                QTimer.singleShot(100, lambda: _fix_macos_app_title(retry + 1))
+            return
+
+        sel_item = objc.sel_registerName(b'itemAtIndex:')
+        app_item = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long)(
+            main_menu, sel_item, 0
+        )
+        if not app_item:
+            return
+
+        sel_submenu = objc.sel_registerName(b'submenu')
+        app_menu = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(app_item, sel_submenu)
+        if not app_menu:
+            return
+
+        NSString = objc.objc_getClass(b'NSString')
+        sel_str = objc.sel_registerName(b'stringWithUTF8String:')
+        title = msg(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)(
+            NSString, sel_str, b'XlsxSearcher'
+        )
+
+        sel_setTitle = objc.sel_registerName(b'setTitle:')
+        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(app_menu, sel_setTitle, title)
+
+    except Exception:
+        pass
+
+
 def run_app():
     """启动应用程序"""
+    _fix_macos_cfbundle_name()
+    QApplication.setApplicationName("XlsxSearcher")
     app = QApplication(sys.argv)
 
     icon_path = _get_icon_path()
@@ -980,4 +1211,10 @@ def run_app():
 
     window = XlsxSearcherApp()
     window.show()
+
+    # macOS 原生 NSMenu 在 show() 之后异步创建，首次快速尝试，必要时自动重试
+    if sys.platform == 'darwin':
+        QTimer.singleShot(50, _fix_macos_app_title)
+        QTimer.singleShot(100, lambda: _apply_macos_unified_titlebar(window))
+
     sys.exit(app.exec_())
