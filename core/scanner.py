@@ -16,6 +16,19 @@ class XlsxScanner:
         self.supported_extensions = ['.xlsx', '.xlsm', '.xls']
         self.max_workers = max_workers
 
+    @staticmethod
+    def _trim_preview_row(row_data: List[str]) -> List[str]:
+        """移除预览行末尾连续空单元格，避免展示虚高的空列。"""
+        last_non_empty_index = -1
+        for index, value in enumerate(row_data):
+            if value != '':
+                last_non_empty_index = index
+
+        if last_non_empty_index == -1:
+            return []
+
+        return row_data[:last_non_empty_index + 1]
+
     def is_xlsx_file(self, filepath: str) -> bool:
         """检查是否为支持的表格文件"""
         ext = os.path.splitext(filepath)[1].lower()
@@ -151,7 +164,8 @@ class XlsxScanner:
             data = []
             row_count = 0
             for row in ws.iter_rows(max_col=max_cols, max_row=max_rows):
-                data.append([str(cell.value) if cell.value is not None else '' for cell in row])
+                row_data = [str(cell.value) if cell.value is not None else '' for cell in row]
+                data.append(self._trim_preview_row(row_data))
                 row_count += 1
                 if row_count >= max_rows:
                     break
@@ -176,7 +190,7 @@ class XlsxScanner:
                 for col_idx in range(min(ws.ncols, max_cols)):
                     val = ws.cell_value(row_idx, col_idx)
                     row_data.append(str(val) if val is not None and val != '' else '')
-                data.append(row_data)
+                data.append(self._trim_preview_row(row_data))
             wb.release_resources()
             return data
         except Exception as e:

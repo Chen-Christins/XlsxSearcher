@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - master
-      - dev
+      - hotfix/*
     tags:
       - 'v*'
   workflow_dispatch:

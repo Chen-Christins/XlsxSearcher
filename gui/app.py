@@ -289,7 +289,7 @@ class XlsxSearcherApp(QMainWindow):
         self.preview_table = QTableWidget()
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.horizontalHeader().setStretchLastSection(False)
         self.preview_table.verticalHeader().setVisible(True)
         preview_layout.addWidget(self.preview_table)
 
@@ -819,10 +819,15 @@ class XlsxSearcherApp(QMainWindow):
             return
 
         num_rows = len(data)
-        num_cols = max(len(row) for row in data) if data else 0
+        num_cols = max((len(row) for row in data), default=0)
 
         self.preview_table.setRowCount(num_rows)
         self.preview_table.setColumnCount(num_cols)
+
+        header = self.preview_table.horizontalHeader()
+        for col in range(num_cols):
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+        header.setStretchLastSection(False)
 
         from openpyxl.utils import get_column_letter
         headers = [get_column_letter(i + 1) for i in range(num_cols)]
@@ -833,8 +838,38 @@ class XlsxSearcherApp(QMainWindow):
             for c, cell_val in enumerate(row_data):
                 self.preview_table.setItem(r, c, QTableWidgetItem(cell_val))
 
-        self.preview_table.resizeColumnsToContents()
+        self._apply_preview_column_widths(num_cols)
+
         self.status_bar.showMessage("就绪")
+
+    def _apply_preview_column_widths(self, num_cols):
+        """按内容确定基础宽度，再把剩余空间尽量均分到所有列。"""
+        if num_cols <= 0:
+            return
+
+        min_width = 80
+        max_width = 240
+
+        self.preview_table.resizeColumnsToContents()
+
+        widths = []
+        for col in range(num_cols):
+            content_width = self.preview_table.columnWidth(col)
+            widths.append(min(max(content_width, min_width), max_width))
+
+        available_width = max(self.preview_table.viewport().width(), 0)
+        total_width = sum(widths)
+
+        if available_width > total_width:
+            extra_width = available_width - total_width
+            add_per_col, remainder = divmod(extra_width, num_cols)
+            widths = [
+                width + add_per_col + (1 if index < remainder else 0)
+                for index, width in enumerate(widths)
+            ]
+
+        for col, width in enumerate(widths):
+            self.preview_table.setColumnWidth(col, width)
 
     def _get_selected_filepath(self):
         """获取选中的文件路径"""
