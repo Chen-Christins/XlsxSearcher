@@ -581,7 +581,10 @@ class XlsxSearcherApp(QMainWindow):
                 QMessageBox.warning(
                     self,
                     '提示',
-                    '未在该文件中解析到有效映射。\n支持格式示例:\ncall do_conv.bat TextConfig 界面文本'
+                    '未在该文件中解析到有效映射。\n'
+                    '标准格式: 英文配置名 子表名1 子表名2 ...\n'
+                    '示例: TextConfig 界面文本 UI Text\n'
+                    '也兼容旧格式: call do_conv.bat TextConfig 界面文本'
                 )
                 return
 

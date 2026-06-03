@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-06-03
+
+## What's Changed
+
+### Fixed
+- 修复 **Sheet 别名映射** 配置格式不统一的问题，确立标准格式 `英文配置名 子表名1 子表名2 ...`，同时兼容旧 `call do_conv.bat ...` 格式
+
 ## [1.3.0] - 2026-06-03
 
 ## What's Changed
