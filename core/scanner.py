@@ -3,7 +3,7 @@ import os
 import time
 import zipfile
 import xml.etree.ElementTree as ET
-from typing import List, Tuple, Callable
+from typing import Dict, List, Tuple, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from openpyxl import load_workbook
 import xlrd
@@ -28,6 +28,22 @@ class XlsxScanner:
             return []
 
         return row_data[:last_non_empty_index + 1]
+
+    @staticmethod
+    def _cell_matches(value: str, keyword: str, match_mode: str) -> bool:
+        """按当前匹配模式判断单元格是否命中关键字。"""
+        if not keyword:
+            return False
+
+        haystack = value.lower()
+        needle = keyword.lower()
+        normalized_mode = match_mode or 'fuzzy'
+
+        if normalized_mode == 'exact':
+            return haystack == needle
+        if normalized_mode == 'prefix':
+            return haystack.startswith(needle)
+        return needle in haystack
 
     def is_xlsx_file(self, filepath: str) -> bool:
         """检查是否为支持的表格文件"""
@@ -147,13 +163,14 @@ class XlsxScanner:
             return [''] * len(sheet_names)
 
     def read_sheet_preview(self, filepath: str, sheet_name: str,
-                           max_rows: int = 20, max_cols: int = 50) -> List[List[str]]:
+                           max_rows: int = 20, max_cols: int = 50,
+                           start_row: int = 1, start_col: int = 1) -> List[List[str]]:
         """
-        读取单个 sheet 的前 max_rows 行 × max_cols 列数据。
+        读取单个 sheet 指定窗口的数据。
         用于预览面板展示。
         """
         if self._is_xls_format(filepath):
-            return self._read_sheet_preview_xls(filepath, sheet_name, max_rows, max_cols)
+            return self._read_sheet_preview_xls(filepath, sheet_name, max_rows, max_cols, start_row, start_col)
 
         try:
             wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -162,13 +179,14 @@ class XlsxScanner:
                 return []
             ws = wb[sheet_name]
             data = []
-            row_count = 0
-            for row in ws.iter_rows(max_col=max_cols, max_row=max_rows):
+            for row in ws.iter_rows(
+                min_row=max(start_row, 1),
+                max_row=max(start_row, 1) + max_rows - 1,
+                min_col=max(start_col, 1),
+                max_col=max(start_col, 1) + max_cols - 1,
+            ):
                 row_data = [str(cell.value) if cell.value is not None else '' for cell in row]
                 data.append(self._trim_preview_row(row_data))
-                row_count += 1
-                if row_count >= max_rows:
-                    break
             wb.close()
             return data
         except Exception as e:
@@ -176,7 +194,8 @@ class XlsxScanner:
             return []
 
     def _read_sheet_preview_xls(self, filepath: str, sheet_name: str,
-                                 max_rows: int = 20, max_cols: int = 50) -> List[List[str]]:
+                                 max_rows: int = 20, max_cols: int = 50,
+                                 start_row: int = 1, start_col: int = 1) -> List[List[str]]:
         """xlrd 版本：读取 .xls 文件的预览数据"""
         try:
             wb = xlrd.open_workbook(filepath, on_demand=True)
@@ -185,9 +204,13 @@ class XlsxScanner:
                 return []
             ws = wb.sheet_by_name(sheet_name)
             data = []
-            for row_idx in range(min(ws.nrows, max_rows)):
+            row_start = max(start_row - 1, 0)
+            row_end = min(ws.nrows, row_start + max_rows)
+            col_start = max(start_col - 1, 0)
+            col_end = min(ws.ncols, col_start + max_cols)
+            for row_idx in range(row_start, row_end):
                 row_data = []
-                for col_idx in range(min(ws.ncols, max_cols)):
+                for col_idx in range(col_start, col_end):
                     val = ws.cell_value(row_idx, col_idx)
                     row_data.append(str(val) if val is not None and val != '' else '')
                 data.append(self._trim_preview_row(row_data))
@@ -195,6 +218,79 @@ class XlsxScanner:
             return data
         except Exception as e:
             print(f"警告: 读取 .xls 预览数据失败 {filepath}: {e}")
+            return []
+
+    def find_sheet_matches(self, filepath: str, sheet_name: str, keyword: str,
+                           match_mode: str = 'fuzzy', max_hits: int = 200) -> List[Dict]:
+        """返回单个 sheet 中命中的单元格坐标和内容。"""
+        if not keyword:
+            return []
+
+        if self._is_xls_format(filepath):
+            return self._find_sheet_matches_xls(filepath, sheet_name, keyword, match_mode, max_hits)
+
+        try:
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            if sheet_name not in wb.sheetnames:
+                wb.close()
+                return []
+
+            ws = wb[sheet_name]
+            matches = []
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is None:
+                        continue
+
+                    value = str(cell.value)
+                    if self._cell_matches(value, keyword, match_mode):
+                        matches.append({
+                            'row': cell.row,
+                            'col': cell.column,
+                            'value': value,
+                        })
+                        if len(matches) >= max_hits:
+                            wb.close()
+                            return matches
+
+            wb.close()
+            return matches
+        except Exception as e:
+            print(f"警告: 查找命中单元格失败 {filepath}: {e}")
+            return []
+
+    def _find_sheet_matches_xls(self, filepath: str, sheet_name: str, keyword: str,
+                                match_mode: str = 'fuzzy', max_hits: int = 200) -> List[Dict]:
+        """xlrd 版本：返回 .xls 文件命中的单元格坐标和内容。"""
+        try:
+            wb = xlrd.open_workbook(filepath, on_demand=True)
+            if sheet_name not in wb.sheet_names():
+                wb.release_resources()
+                return []
+
+            ws = wb.sheet_by_name(sheet_name)
+            matches = []
+            for row_idx in range(ws.nrows):
+                for col_idx in range(ws.ncols):
+                    val = ws.cell_value(row_idx, col_idx)
+                    if val is None or val == '':
+                        continue
+
+                    value = str(val)
+                    if self._cell_matches(value, keyword, match_mode):
+                        matches.append({
+                            'row': row_idx + 1,
+                            'col': col_idx + 1,
+                            'value': value,
+                        })
+                        if len(matches) >= max_hits:
+                            wb.release_resources()
+                            return matches
+
+            wb.release_resources()
+            return matches
+        except Exception as e:
+            print(f"警告: 查找 .xls 命中单元格失败 {filepath}: {e}")
             return []
 
     def scan_file(self, filepath: str) -> Tuple[str, float, List[str]] | None:

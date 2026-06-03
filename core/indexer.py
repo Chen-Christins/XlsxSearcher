@@ -187,6 +187,29 @@ class IndexManager:
             'mapping_count': row[1] if row else 0,
         }
 
+    def get_index_status(self) -> Dict:
+        """返回索引覆盖情况，供状态栏和提示文案使用。"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT COUNT(*) FROM xlsx_files')
+        file_count = cursor.fetchone()[0]
+
+        cursor.execute('SELECT COUNT(*) FROM sheets')
+        sheet_count = cursor.fetchone()[0]
+
+        cursor.execute('SELECT COUNT(*) FROM sheets WHERE cell_text IS NULL')
+        pending_deep_index_count = cursor.fetchone()[0]
+
+        conn.close()
+
+        return {
+            'file_count': file_count,
+            'sheet_count': sheet_count,
+            'pending_deep_index_count': pending_deep_index_count,
+            'indexed_cell_sheet_count': max(sheet_count - pending_deep_index_count, 0),
+        }
+
     def _fetch_grouped_results(
         self,
         sheet_keywords: List[str] = None,

@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QBrush, QColor, QIcon
 
 from core.indexer import IndexManager
 from core.alias_parser import parse_sheet_alias_file
@@ -130,11 +130,21 @@ class XlsxSearcherApp(QMainWindow):
         self.is_scanning = False
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
+        self.preview_state = {
+            'filepath': '',
+            'sheet_name': '',
+            'start_row': 1,
+            'start_col': 1,
+            'hits': [],
+            'current_hit_index': -1,
+            'active_keyword': '',
+        }
 
         self._init_ui()
         self._restore_ui_preferences()
         self._restore_scan_directory()
         self._restore_search_history()
+        self._refresh_index_status_label()
         self._check_existing_index()
 
     def _init_ui(self):
@@ -254,6 +264,10 @@ class XlsxSearcherApp(QMainWindow):
 
         search_outer.addLayout(row2)
 
+        self.index_status_label = QLabel("索引状态: 0 文件 / 0 子表 / 0 已深度索引")
+        self.index_status_label.setStyleSheet("color: gray")
+        search_outer.addWidget(self.index_status_label)
+
         # 状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -285,6 +299,28 @@ class XlsxSearcherApp(QMainWindow):
 
         self.preview_label = QLabel("预览: 请选择一个结果项")
         preview_layout.addWidget(self.preview_label)
+
+        preview_search_layout = QHBoxLayout()
+        preview_search_layout.setSpacing(6)
+        self.preview_search_entry = QLineEdit()
+        self.preview_search_entry.setPlaceholderText("当前预览内搜索")
+        self.preview_search_entry.returnPressed.connect(self._search_within_preview)
+        self.preview_search_entry.editingFinished.connect(self._search_within_preview)
+        self.preview_search_entry.setEnabled(False)
+        self.btn_preview_prev = QPushButton("上一个")
+        self.btn_preview_prev.clicked.connect(self._goto_prev_preview_hit)
+        self.btn_preview_prev.setEnabled(False)
+        self.btn_preview_next = QPushButton("下一个")
+        self.btn_preview_next.clicked.connect(self._goto_next_preview_hit)
+        self.btn_preview_next.setEnabled(False)
+        self.preview_hit_label = QLabel("命中: 0")
+        self.preview_hit_label.setStyleSheet("color: gray")
+        preview_search_layout.addWidget(QLabel("预览内搜索:"))
+        preview_search_layout.addWidget(self.preview_search_entry, 1)
+        preview_search_layout.addWidget(self.btn_preview_prev)
+        preview_search_layout.addWidget(self.btn_preview_next)
+        preview_search_layout.addWidget(self.preview_hit_label)
+        preview_layout.addLayout(preview_search_layout)
 
         self.preview_table = QTableWidget()
         self.preview_table.setAlternatingRowColors(True)
@@ -377,6 +413,8 @@ class XlsxSearcherApp(QMainWindow):
         stats = self.index_manager.get_stats()
         if stats['file_count'] > 0:
             self._do_search()
+        else:
+            self._update_status_summary()
 
     def _restore_scan_directory(self):
         """恢复上次扫描目录"""
@@ -427,6 +465,99 @@ class XlsxSearcherApp(QMainWindow):
         self.settings.setValue('search/match_mode', self.match_mode_combo.currentData())
         self.settings.setValue('search/sort_mode', self.current_sort_mode)
         self.settings.setValue('search/view_mode', self.current_view_mode)
+
+    def _refresh_index_status_label(self):
+        """刷新索引覆盖率提示。"""
+        status = self.index_manager.get_index_status()
+        self.index_status_label.setText(
+            "索引状态: "
+            f"{status['file_count']} 文件 / "
+            f"{status['sheet_count']} 子表 / "
+            f"{status['indexed_cell_sheet_count']} 已深度索引 / "
+            f"{status['pending_deep_index_count']} 待补全"
+        )
+
+    def _reset_preview_state(self):
+        """清空当前预览和命中定位状态。"""
+        self.preview_state = {
+            'filepath': '',
+            'sheet_name': '',
+            'start_row': 1,
+            'start_col': 1,
+            'hits': [],
+            'current_hit_index': -1,
+            'active_keyword': '',
+        }
+        self._update_preview_controls()
+
+    def _clear_preview(self, message="预览: 请选择一个结果项"):
+        """重置预览表格内容。"""
+        self.preview_label.setText(message)
+        self.preview_table.clear()
+        self.preview_table.setRowCount(0)
+        self.preview_table.setColumnCount(0)
+        self.preview_hit_label.setText("命中: 0")
+
+    def _update_preview_controls(self):
+        """根据当前命中状态刷新预览控件可用性和提示。"""
+        has_sheet = bool(self.preview_state.get('filepath') and self.preview_state.get('sheet_name'))
+        hits = self.preview_state.get('hits', [])
+        current_index = self.preview_state.get('current_hit_index', -1)
+        self.preview_search_entry.setEnabled(has_sheet)
+        self.btn_preview_prev.setEnabled(len(hits) > 1)
+        self.btn_preview_next.setEnabled(len(hits) > 1)
+
+        if hits and current_index >= 0:
+            self.preview_hit_label.setText(f"命中: {current_index + 1}/{len(hits)}")
+        else:
+            self.preview_hit_label.setText(f"命中: {len(hits)}")
+
+    def _compute_preview_start(self, hit):
+        """根据命中坐标计算预览窗口左上角。"""
+        row = max(int(hit.get('row', 1)) - 3, 1)
+        col = max(int(hit.get('col', 1)) - 2, 1)
+        return row, col
+
+    def _build_preview_label(self, filepath, sheet_name):
+        """拼接预览标题和命中定位信息。"""
+        base = f"预览: {sheet_name}  ({self._truncate_path(filepath, 80)})"
+        hits = self.preview_state.get('hits', [])
+        current_index = self.preview_state.get('current_hit_index', -1)
+        if not hits:
+            return base
+
+        current_hit = hits[current_index] if 0 <= current_index < len(hits) else hits[0]
+        from openpyxl.utils import get_column_letter
+        coord = f"{get_column_letter(current_hit['col'])}{current_hit['row']}"
+        return f"{base} | 命中 {len(hits)} 处 | 当前 {coord}"
+
+    def _get_window_hit_positions(self, num_rows, num_cols):
+        """返回当前预览窗口内所有命中的相对坐标。"""
+        positions = set()
+        start_row = self.preview_state.get('start_row', 1)
+        start_col = self.preview_state.get('start_col', 1)
+        end_row = start_row + num_rows - 1
+        end_col = start_col + num_cols - 1
+
+        for hit in self.preview_state.get('hits', []):
+            row = hit.get('row', 0)
+            col = hit.get('col', 0)
+            if start_row <= row <= end_row and start_col <= col <= end_col:
+                positions.add((row - start_row, col - start_col))
+
+        return positions
+
+    def _get_current_window_hit_position(self):
+        """返回当前选中命中在预览窗口中的相对坐标。"""
+        hits = self.preview_state.get('hits', [])
+        current_index = self.preview_state.get('current_hit_index', -1)
+        if not hits or current_index < 0 or current_index >= len(hits):
+            return None
+
+        hit = hits[current_index]
+        start_row = self.preview_state.get('start_row', 1)
+        start_col = self.preview_state.get('start_col', 1)
+        return hit['row'] - start_row, hit['col'] - start_col
 
     def _save_scan_directory(self):
         """保存当前扫描目录"""
@@ -606,12 +737,14 @@ class XlsxSearcherApp(QMainWindow):
 
         # 执行初始搜索
         self._do_search()
+        self._refresh_index_status_label()
         self._update_status_summary(prefix=f"索引完成，耗时 {time_str}")
 
     def _on_scan_error(self, error_msg):
         """扫描错误回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
+        self._refresh_index_status_label()
         self.status_bar.showMessage("扫描出错")
         QMessageBox.critical(self, "错误", f"扫描失败: {error_msg}")
 
@@ -643,6 +776,7 @@ class XlsxSearcherApp(QMainWindow):
             self.status_bar.showMessage(
                 f"深度索引完成：已处理 {processed}/{total} 个子表，耗时 {duration:.1f}秒"
             )
+        self._refresh_index_status_label()
         self._do_search()
 
     def _clear_index(self):
@@ -654,6 +788,8 @@ class XlsxSearcherApp(QMainWindow):
             self.index_manager.clear_index()
             self.search_results = []
             self.result_tree.clear()
+            self._reset_preview_state()
+            self._refresh_index_status_label()
             self._update_status_summary(prefix='索引已清空')
 
     def _do_search(self):
@@ -673,6 +809,7 @@ class XlsxSearcherApp(QMainWindow):
 
         self._sort_results()
         self._update_results()
+        self._refresh_index_status_label()
 
     def _on_search_committed(self):
         """仅在用户明确完成输入后写入搜索历史"""
@@ -685,11 +822,9 @@ class XlsxSearcherApp(QMainWindow):
     def _update_results(self):
         """更新搜索结果表格"""
         self.result_tree.clear()
+        self._reset_preview_state()
         # 清空预览
-        self.preview_label.setText("预览: 请选择一个结果项")
-        self.preview_table.clear()
-        self.preview_table.setRowCount(0)
-        self.preview_table.setColumnCount(0)
+        self._clear_preview(message="预览: 请选择一个结果项")
 
         for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
             btn.setEnabled(False)
@@ -785,36 +920,67 @@ class XlsxSearcherApp(QMainWindow):
             sheet_name = ''
 
         if filepath and sheet_name:
-            self._update_preview(filepath, sheet_name)
+            search_keyword = self.preview_search_entry.text().strip() or self.cell_entry.text().strip()
+            match_mode = self.match_mode_combo.currentData()
+            hits = []
+            current_hit_index = -1
+            start_row = 1
+            start_col = 1
 
-    def _update_preview(self, filepath, sheet_name):
-        """加载预览面板：读取 sheet 前 20 行数据并填充表格"""
-        if not filepath or not os.path.exists(filepath):
-            self.preview_label.setText(f"预览: 文件不存在或已被移动")
-            self.preview_table.clear()
-            self.preview_table.setRowCount(0)
-            self.preview_table.setColumnCount(0)
+            if search_keyword:
+                hits = self.scanner.find_sheet_matches(filepath, sheet_name, search_keyword, match_mode)
+                if hits:
+                    current_hit_index = 0
+                    start_row, start_col = self._compute_preview_start(hits[0])
+
+            self.preview_state.update({
+                'filepath': filepath,
+                'sheet_name': sheet_name,
+                'start_row': start_row,
+                'start_col': start_col,
+                'hits': hits,
+                'current_hit_index': current_hit_index,
+                'active_keyword': search_keyword,
+            })
+
+            self.preview_search_entry.blockSignals(True)
+            self.preview_search_entry.setText(search_keyword)
+            self.preview_search_entry.blockSignals(False)
+            self._update_preview_controls()
+            self._update_preview(filepath, sheet_name, start_row=start_row, start_col=start_col)
             return
 
-        self.preview_label.setText(f"预览: {sheet_name}  ({self._truncate_path(filepath, 80)})")
+        self._reset_preview_state()
+        self._clear_preview(message="预览: 请选择一个子表")
+
+    def _update_preview(self, filepath, sheet_name, start_row=1, start_col=1):
+        """加载预览面板：读取 sheet 前 20 行数据并填充表格"""
+        if not filepath or not os.path.exists(filepath):
+            self._clear_preview(message="预览: 文件不存在或已被移动")
+            return
+
+        self.preview_state['start_row'] = start_row
+        self.preview_state['start_col'] = start_col
+        self.preview_label.setText(self._build_preview_label(filepath, sheet_name))
         self.status_bar.showMessage("正在加载预览...")
         QApplication.processEvents()
 
         try:
-            data = self.scanner.read_sheet_preview(filepath, sheet_name, max_rows=20, max_cols=50)
+            data = self.scanner.read_sheet_preview(
+                filepath,
+                sheet_name,
+                max_rows=20,
+                max_cols=50,
+                start_row=start_row,
+                start_col=start_col,
+            )
         except Exception as e:
-            self.preview_label.setText(f"预览: 读取失败 - {e}")
-            self.preview_table.clear()
-            self.preview_table.setRowCount(0)
-            self.preview_table.setColumnCount(0)
+            self._clear_preview(message=f"预览: 读取失败 - {e}")
             self.status_bar.showMessage("预览加载失败")
             return
 
         if not data:
-            self.preview_label.setText(f"预览: {sheet_name} (空表)")
-            self.preview_table.clear()
-            self.preview_table.setRowCount(0)
-            self.preview_table.setColumnCount(0)
+            self._clear_preview(message=f"预览: {sheet_name} (空表)")
             self.status_bar.showMessage("就绪")
             return
 
@@ -823,6 +989,7 @@ class XlsxSearcherApp(QMainWindow):
 
         self.preview_table.setRowCount(num_rows)
         self.preview_table.setColumnCount(num_cols)
+        self.preview_table.clearContents()
 
         header = self.preview_table.horizontalHeader()
         for col in range(num_cols):
@@ -830,17 +997,80 @@ class XlsxSearcherApp(QMainWindow):
         header.setStretchLastSection(False)
 
         from openpyxl.utils import get_column_letter
-        headers = [get_column_letter(i + 1) for i in range(num_cols)]
+        headers = [get_column_letter(start_col + i) for i in range(num_cols)]
         self.preview_table.setHorizontalHeaderLabels(headers)
-        self.preview_table.setVerticalHeaderLabels([str(i + 1) for i in range(num_rows)])
+        self.preview_table.setVerticalHeaderLabels([str(start_row + i) for i in range(num_rows)])
 
+        window_hits = self._get_window_hit_positions(num_rows, num_cols)
+        current_hit_position = self._get_current_window_hit_position()
         for r, row_data in enumerate(data):
             for c, cell_val in enumerate(row_data):
-                self.preview_table.setItem(r, c, QTableWidgetItem(cell_val))
+                item = QTableWidgetItem(cell_val)
+                hit_key = (r, c)
+                if hit_key in window_hits:
+                    item.setBackground(QBrush(QColor('#FFF3B0')))
+                if current_hit_position == hit_key:
+                    item.setBackground(QBrush(QColor('#FFD166')))
+                self.preview_table.setItem(r, c, item)
 
         self._apply_preview_column_widths(num_cols)
+        self._update_preview_controls()
+        self.preview_label.setText(self._build_preview_label(filepath, sheet_name))
 
         self.status_bar.showMessage("就绪")
+
+    def _search_within_preview(self):
+        """在当前预览的 sheet 内重新搜索并跳到首个命中。"""
+        filepath = self.preview_state.get('filepath')
+        sheet_name = self.preview_state.get('sheet_name')
+        if not filepath or not sheet_name:
+            return
+
+        keyword = self.preview_search_entry.text().strip()
+        match_mode = self.match_mode_combo.currentData()
+        hits = self.scanner.find_sheet_matches(filepath, sheet_name, keyword, match_mode) if keyword else []
+        current_hit_index = 0 if hits else -1
+        start_row, start_col = (1, 1)
+        if hits:
+            start_row, start_col = self._compute_preview_start(hits[0])
+
+        self.preview_state.update({
+            'hits': hits,
+            'current_hit_index': current_hit_index,
+            'active_keyword': keyword,
+            'start_row': start_row,
+            'start_col': start_col,
+        })
+        self._update_preview(filepath, sheet_name, start_row=start_row, start_col=start_col)
+
+    def _goto_prev_preview_hit(self):
+        """跳到上一个命中。"""
+        self._goto_preview_hit(-1)
+
+    def _goto_next_preview_hit(self):
+        """跳到下一个命中。"""
+        self._goto_preview_hit(1)
+
+    def _goto_preview_hit(self, step):
+        """在命中列表中跳转。"""
+        hits = self.preview_state.get('hits', [])
+        if not hits:
+            return
+
+        current_index = self.preview_state.get('current_hit_index', -1)
+        if current_index < 0:
+            current_index = 0
+        else:
+            current_index = (current_index + step) % len(hits)
+
+        self.preview_state['current_hit_index'] = current_index
+        start_row, start_col = self._compute_preview_start(hits[current_index])
+        self._update_preview(
+            self.preview_state['filepath'],
+            self.preview_state['sheet_name'],
+            start_row=start_row,
+            start_col=start_col,
+        )
 
     def _apply_preview_column_widths(self, num_cols):
         """按内容确定基础宽度，再把剩余空间尽量均分到所有列。"""
@@ -942,14 +1172,36 @@ class XlsxSearcherApp(QMainWindow):
         matched_sheet_count = sum(result.get('sheet_count', 0) for result in self.search_results)
         if self.is_scanning:
             return
+
+        index_status = self.index_manager.get_index_status()
         view_label = '分组视图' if self.current_view_mode == 'grouped' else '列表视图'
         summary = f"{view_label}：找到 {file_count} 个文件，{matched_sheet_count} 个子表命中"
 
         cell_keyword = self.cell_entry.text().strip() if hasattr(self, 'cell_entry') else ''
-        if cell_keyword and file_count == 0:
-            pending = self.index_manager.get_sheets_without_cell_text()
-            if pending:
-                summary += " | 提示：需先点击'深度索引'提取单元格内容"
+        sheet_keyword = self.sheet_entry.text().strip() if hasattr(self, 'sheet_entry') else ''
+        filename_keyword = self.filename_entry.text().strip() if hasattr(self, 'filename_entry') else ''
+        match_mode = self.match_mode_combo.currentData() if hasattr(self, 'match_mode_combo') else 'fuzzy'
+
+        if index_status['file_count'] == 0:
+            summary += " | 提示：请先选择目录并扫描建立索引"
+        elif file_count == 0:
+            if cell_keyword and index_status['pending_deep_index_count'] > 0:
+                summary += (
+                    " | 提示：未找到结果，且还有 "
+                    f"{index_status['pending_deep_index_count']} 个子表未完成深度索引"
+                )
+            elif match_mode == 'exact' and (sheet_keyword or filename_keyword or cell_keyword):
+                summary += " | 提示：当前为精确匹配，可尝试切换到模糊匹配"
+            else:
+                summary += (
+                    " | 提示：当前索引中共有 "
+                    f"{index_status['file_count']} 个文件 / {index_status['sheet_count']} 个子表，可尝试放宽关键词"
+                )
+        elif cell_keyword and index_status['pending_deep_index_count'] > 0:
+            summary += (
+                " | 提示：仍有 "
+                f"{index_status['pending_deep_index_count']} 个子表未完成深度索引，单元格搜索可能不完整"
+            )
 
         if prefix:
             self.status_bar.showMessage(f"{prefix}；{summary}")
