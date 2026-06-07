@@ -1,5 +1,7 @@
 # XlsxSearcher
 
+[English](README_EN.md) | 中文
+
 Excel 配置表搜索工具 — 面向游戏策划，快速定位 xlsx/xls 文件中的子表和单元格数据
 
 ## 功能特性
