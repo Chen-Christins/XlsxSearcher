@@ -111,6 +111,35 @@ class DeepIndexWorker(QThread):
             self.error.emit(str(e))
 
 
+class SearchWorker(QThread):
+    """搜索工作线程 — 在后台执行 SQLite 查询和结果分组，避免阻塞 UI"""
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, searcher, index_manager, sheet_keyword, filename_keyword,
+                 cell_keyword, match_mode):
+        super().__init__()
+        self.searcher = searcher
+        self.index_manager = index_manager
+        self.sheet_keyword = sheet_keyword
+        self.filename_keyword = filename_keyword
+        self.cell_keyword = cell_keyword
+        self.match_mode = match_mode
+
+    def run(self):
+        try:
+            if not self.sheet_keyword and not self.filename_keyword and not self.cell_keyword:
+                results = self.index_manager.get_all_files_with_sheets()
+            else:
+                results = self.searcher.search(
+                    self.sheet_keyword, self.filename_keyword,
+                    self.cell_keyword, self.match_mode
+                )
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class XlsxSearcherApp(QMainWindow):
     MAX_SEARCH_HISTORY = 15
 
@@ -128,6 +157,7 @@ class XlsxSearcherApp(QMainWindow):
         self.search_results = []
         self.search_history = []
         self.is_scanning = False
+        self.search_worker = None
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
         self.preview_state = {
@@ -154,6 +184,11 @@ class XlsxSearcherApp(QMainWindow):
         self.setMinimumSize(1000, 700)
         self.resize(1000, 700)
 
+        # 搜索防抖定时器
+        self.search_timer = QTimer()
+        self.search_timer.setSingleShot(True)
+        self.search_timer.timeout.connect(self._do_search)
+
         # macOS 统一标题栏样式
         if sys.platform == 'darwin':
             self.setUnifiedTitleAndToolBarOnMac(True)
@@ -173,7 +208,7 @@ class XlsxSearcherApp(QMainWindow):
         top_widget = QWidget()
         top_widget.installEventFilter(self)  # 用于 macOS 窗口拖拽
         top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(80, 20, 10, 5)
+        top_layout.setContentsMargins(80, 5, 10, 5)
         main_layout.addWidget(top_widget)
 
         # 目录选择和显示
@@ -196,7 +231,7 @@ class XlsxSearcherApp(QMainWindow):
         # 搜索区域（两行）
         search_widget = QWidget()
         search_outer = QVBoxLayout(search_widget)
-        search_outer.setContentsMargins(10, 5, 10, 10)
+        search_outer.setContentsMargins(10, 0, 10, 10)
         search_outer.setSpacing(4)
         main_layout.addWidget(search_widget)
 
@@ -205,7 +240,7 @@ class XlsxSearcherApp(QMainWindow):
         row1.setSpacing(6)
         self.sheet_entry = QLineEdit()
         self.sheet_entry.setPlaceholderText("子表名称或英文配置名")
-        self.sheet_entry.textChanged.connect(self._do_search)
+        self.sheet_entry.textChanged.connect(self._schedule_search)
         self.sheet_entry.returnPressed.connect(self._on_search_committed)
         self.sheet_entry.editingFinished.connect(self._on_search_committed)
         row1.addWidget(QLabel("子表名称:"))
@@ -213,7 +248,7 @@ class XlsxSearcherApp(QMainWindow):
 
         self.filename_entry = QLineEdit()
         self.filename_entry.setPlaceholderText("文件名")
-        self.filename_entry.textChanged.connect(self._do_search)
+        self.filename_entry.textChanged.connect(self._schedule_search)
         self.filename_entry.returnPressed.connect(self._on_search_committed)
         self.filename_entry.editingFinished.connect(self._on_search_committed)
         row1.addWidget(QLabel("文件名:"))
@@ -221,7 +256,7 @@ class XlsxSearcherApp(QMainWindow):
 
         self.cell_entry = QLineEdit()
         self.cell_entry.setPlaceholderText("单元格内容")
-        self.cell_entry.textChanged.connect(self._do_search)
+        self.cell_entry.textChanged.connect(self._schedule_search)
         self.cell_entry.returnPressed.connect(self._on_search_committed)
         self.cell_entry.editingFinished.connect(self._on_search_committed)
         row1.addWidget(QLabel("单元格:"))
@@ -236,7 +271,7 @@ class XlsxSearcherApp(QMainWindow):
         self.match_mode_combo.addItem("模糊匹配", 'fuzzy')
         self.match_mode_combo.addItem("前缀匹配", 'prefix')
         self.match_mode_combo.addItem("精确匹配", 'exact')
-        self.match_mode_combo.currentIndexChanged.connect(self._do_search)
+        self.match_mode_combo.currentIndexChanged.connect(self._schedule_search)
         row2.addWidget(QLabel("匹配:"))
         row2.addWidget(self.match_mode_combo, 1)
 
@@ -795,24 +830,42 @@ class XlsxSearcherApp(QMainWindow):
             self._refresh_index_status_label()
             self._update_status_summary(prefix='索引已清空')
 
+    def _schedule_search(self):
+        """防抖：延迟 75ms 后执行搜索，避免每次按键都触发查询"""
+        self.search_timer.start(75)
+
     def _do_search(self):
-        """执行搜索"""
+        """在后台线程执行搜索，避免阻塞 UI"""
+        # 取消上一次未完成的搜索
+        if self.search_worker and self.search_worker.isRunning():
+            self.search_worker.finished.disconnect(self._on_search_finished)
+            self.search_worker.error.disconnect(self._on_search_error)
+            self.search_worker.terminate()
+            self.search_worker.wait()
+
         sheet_keyword = self.sheet_entry.text().strip()
         filename_keyword = self.filename_entry.text().strip()
         cell_keyword = self.cell_entry.text().strip()
         match_mode = self.match_mode_combo.currentData()
-        self._save_ui_preferences()
 
-        if not sheet_keyword and not filename_keyword and not cell_keyword:
-            self.search_results = self.index_manager.get_all_files_with_sheets()
-        else:
-            self.search_results = self.searcher.search(
-                sheet_keyword, filename_keyword, cell_keyword, match_mode
-            )
+        self.search_worker = SearchWorker(
+            self.searcher, self.index_manager,
+            sheet_keyword, filename_keyword, cell_keyword, match_mode
+        )
+        self.search_worker.finished.connect(self._on_search_finished)
+        self.search_worker.error.connect(self._on_search_error)
+        self.search_worker.start()
 
+    def _on_search_finished(self, results):
+        """后台搜索完成，在 UI 线程更新结果"""
+        self.search_results = results
         self._sort_results()
         self._update_results()
         self._refresh_index_status_label()
+
+    def _on_search_error(self, error_msg):
+        """后台搜索出错"""
+        QMessageBox.critical(self, '搜索错误', f'搜索失败: {error_msg}')
 
     def _on_search_committed(self):
         """仅在用户明确完成输入后写入搜索历史"""
@@ -844,6 +897,7 @@ class XlsxSearcherApp(QMainWindow):
         """按文件分组展示结果"""
         self.result_tree.setRootIsDecorated(True)
         self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
+        self.result_tree.setUpdatesEnabled(False)
 
         for result in self.search_results:
             top_item = QTreeWidgetItem([
@@ -868,10 +922,13 @@ class XlsxSearcherApp(QMainWindow):
             if result.get('sheet_names'):
                 top_item.setExpanded(True)
 
+        self.result_tree.setUpdatesEnabled(True)
+
     def _update_flat_results(self):
         """按旧版平铺列表展示结果"""
         self.result_tree.setRootIsDecorated(False)
         self.result_tree.setHeaderLabels(["文件名", "子表名称", "文件路径"])
+        self.result_tree.setUpdatesEnabled(False)
 
         for result in self.search_results:
             sheet_names = result.get('sheet_names', [])
@@ -895,6 +952,8 @@ class XlsxSearcherApp(QMainWindow):
             item.setData(0, Qt.UserRole, result['filepath'])
             item.setData(0, Qt.UserRole + 1, 'flat')
             self.result_tree.addTopLevelItem(item)
+
+        self.result_tree.setUpdatesEnabled(True)
 
     def _on_select(self, item, column):
         """选中结果项"""
@@ -1295,6 +1354,12 @@ class XlsxSearcherApp(QMainWindow):
             return path
         return "..." + path[-max_length:]
 
+    def closeEvent(self, event):
+        """窗口关闭时保存偏好设置"""
+        self._save_ui_preferences()
+        self._save_scan_directory()
+        event.accept()
+
     def eventFilter(self, obj, event):
         """顶部区域拖拽窗口 + 双击放大（macOS 统一标题栏）"""
         if sys.platform != 'darwin':
@@ -1500,11 +1565,12 @@ def run_app():
         app.setWindowIcon(QIcon(icon_path))
 
     window = XlsxSearcherApp()
-    window.show()
 
-    # macOS 原生 NSMenu 在 show() 之后异步创建，首次快速尝试，必要时自动重试
     if sys.platform == 'darwin':
+        # 提前创建原生窗口句柄，在 show() 之前应用透明标题栏，避免闪烁
+        _ = window.winId()
+        _apply_macos_unified_titlebar(window)
         QTimer.singleShot(50, _fix_macos_app_title)
-        QTimer.singleShot(100, lambda: _apply_macos_unified_titlebar(window))
 
+    window.show()
     sys.exit(app.exec_())

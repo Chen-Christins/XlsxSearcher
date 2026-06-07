@@ -54,6 +54,9 @@ class IndexManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_alias_name ON sheet_aliases(alias_name)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_alias_sheet_name ON sheet_aliases(sheet_name)')
 
+        # Enable WAL mode for concurrent reads/writes
+        cursor.execute('PRAGMA journal_mode=WAL')
+
         # Migration: add cell_text column for cell content search
         cursor.execute("PRAGMA table_info(sheets)")
         columns = [col[1] for col in cursor.fetchall()]
@@ -99,13 +102,16 @@ class IndexManager:
             )
             file_id = cursor.lastrowid
 
-        # 插入子表信息
-        for i, sheet_name in enumerate(sheet_names):
-            cell_text = cell_texts[i] if cell_texts and i < len(cell_texts) else None
-            cursor.execute(
-                'INSERT INTO sheets (file_id, sheet_name, cell_text) VALUES (?, ?, ?)',
-                (file_id, sheet_name, cell_text)
-            )
+        # 插入子表信息（批量）
+        if cell_texts:
+            extra = [None] * (len(sheet_names) - len(cell_texts))
+            cell_texts = cell_texts + extra
+        else:
+            cell_texts = [None] * len(sheet_names)
+        cursor.executemany(
+            'INSERT INTO sheets (file_id, sheet_name, cell_text) VALUES (?, ?, ?)',
+            [(file_id, s, c) for s, c in zip(sheet_names, cell_texts)]
+        )
         conn.commit()
         conn.close()
 
@@ -337,9 +343,7 @@ class IndexManager:
         """批量更新 sheet 的 cell_text（单事务，一次连接）"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('BEGIN')
-        for sheet_id, cell_text in updates:
-            cursor.execute('UPDATE sheets SET cell_text = ? WHERE id = ?', (cell_text, sheet_id))
+        cursor.executemany('UPDATE sheets SET cell_text = ? WHERE id = ?', updates)
         conn.commit()
         conn.close()
 
