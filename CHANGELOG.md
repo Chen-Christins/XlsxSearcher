@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-06-08
+
+## What's Changed
+
+### Fixed
+- 修复深度索引完成后仍显示"0 已深度索引 / 全部待补全"的严重 bug — `_extract` 中 sheet id 与 cell_text 参数顺序颠倒，导致 UPDATE 从未命中任何行
+- 修复重新扫描会清空已完成的深度索引数据 — upsert 更新已有文件时 DELETE sheet 后重新 INSERT 时 cell_text 写死为 NULL
+- 修复 `add_file` 方法存在同样的 cell_text 丢失隐患
+- 修复深度索引过程中文件提取失败时静默吞错 — 错误仅 print 到控制台，GUI 无任何提示
+- 修复深度索引完成后耗时信息不显示 — `_on_deep_index_complete` 未使用 `_pending_status_prefix` 机制，耗时被后续搜索结果刷新覆盖
+- 修复未选择扫描目录时点击「重新扫描」静默无反应
+- 修复 QMessageBox 静态方法在 macOS 上不显示图标 — 改用 `QApplication.windowIcon()` 显式设置应用图标
+- 修复 `alias_parser.py` 中不可达死代码
+- 修复 `update_sheet_cell_texts_batch` 类型标注与实际参数顺序矛盾
+- 修复非 macOS 平台首行文本右偏移的问题
+- 修复深度索引处理超大 xlsx 文件时内存溢出 — 超过 200MB 的文件自动跳过并提示用户
+- 修复 `extract_cell_texts` 中 `wb.close()` 异常时未执行导致的内存泄漏
+
+### Improved
+- **扫描性能大幅优化**：
+  - sheet 名提取从 ET.parse DOM 解析改为编译正则，快 2-3x
+  - 进度上报改为每 16 个文件一次，减少 GUI 信号开销
+  - 按目录路径排序提交任务，改善磁盘局部性和 SSD 预读命中率
+  - `zf.read()` 替代 `zf.open() + f.read()`，减少 zip 包装层开销
+- `QThread.terminate()` 改为协作式取消（`_cancelled` 标志），避免强制终止线程可能导致 SQLite 连接泄漏
+- 深度索引并发数从 4 降到 2，降低多文件同时加载的峰值内存
+- 深度索引失败时收集错误并汇总弹窗提示用户
+- 清理死代码：移除未使用的 `scan_file` / `scan_directory` 旧版同步扫描方法及多余 import
+- 扫描进度栏与深度索引进度栏统一
+
 ## [1.3.1] - 2026-06-03
 
 ## What's Changed

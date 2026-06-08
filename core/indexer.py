@@ -75,6 +75,18 @@ class IndexManager:
         conn.close()
         return result  # (id, modified_time) or None
 
+    def get_all_files_indexed(self) -> Dict[str, Tuple[int, float]]:
+        """一次查询拿到 filepath -> (id, modified_time) 的快照。
+
+        比 N 次 get_file_info 少 N-1 次连接 + 查询。
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, filepath, modified_time FROM xlsx_files')
+        rows = cursor.fetchall()
+        conn.close()
+        return {r[1]: (r[0], r[2]) for r in rows}
+
     def add_file(self, filename: str, filepath: str, modified_time: float,
                  sheet_names: List[str], cell_texts: List[str] = None):
         """添加文件及其子表到索引，可选附带单元格内容"""
@@ -85,9 +97,17 @@ class IndexManager:
         cursor.execute('SELECT id FROM xlsx_files WHERE filepath = ?', (filepath,))
         row = cursor.fetchone()
 
+        # 查询已有 cell_text 以便保留
+        old_cell_texts = {}
+        if row:
+            file_id = row[0]
+            cursor.execute(
+                'SELECT sheet_name, cell_text FROM sheets WHERE file_id = ?', (file_id,)
+            )
+            old_cell_texts = {r[0]: r[1] for r in cursor.fetchall()}
+
         if row:
             # 已存在，更新并获取 file_id
-            file_id = row[0]
             cursor.execute(
                 'UPDATE xlsx_files SET filename = ?, modified_time = ?, sheet_count = ? WHERE id = ?',
                 (filename, modified_time, len(sheet_names), file_id)
@@ -102,18 +122,109 @@ class IndexManager:
             )
             file_id = cursor.lastrowid
 
-        # 插入子表信息（批量）
+        # 插入子表信息（批量），优先使用传入的 cell_texts，其次保留旧的
         if cell_texts:
             extra = [None] * (len(sheet_names) - len(cell_texts))
             cell_texts = cell_texts + extra
         else:
-            cell_texts = [None] * len(sheet_names)
+            cell_texts = [
+                old_cell_texts.get(sheet_name)
+                for sheet_name in sheet_names
+            ]
         cursor.executemany(
             'INSERT INTO sheets (file_id, sheet_name, cell_text) VALUES (?, ?, ?)',
             [(file_id, s, c) for s, c in zip(sheet_names, cell_texts)]
         )
         conn.commit()
         conn.close()
+
+    def upsert_files_batch(self, updates: List[Tuple[str, str, float, List[str]]],
+                            indexed: Dict[str, Tuple[int, float]] = None
+                            ) -> Tuple[int, int]:
+        """在单个事务里批量 upsert 文件及其子表。
+
+        updates: [(filename, filepath, mtime, sheet_names), ...]
+        indexed: 当前索引快照 filepath -> (id, mtime)；提供时无需回查即可区分 add/update。
+        返回 (added, updated) 计数。
+        """
+        if not updates:
+            return 0, 0
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('PRAGMA synchronous=NORMAL')
+
+            # 一次性回查 index 中已有的 file_id（如果调用方没传快照）
+            if indexed is None:
+                filepaths = [u[1] for u in updates]
+                placeholders = ','.join('?' * len(filepaths))
+                cursor.execute(
+                    f'SELECT filepath, id FROM xlsx_files WHERE filepath IN ({placeholders})',
+                    filepaths
+                )
+                indexed = {fp: (row_id, None) for fp, row_id in cursor.fetchall()}
+
+            added = 0
+            updated = 0
+            sheet_inserts = []
+            file_ids_to_clear = []
+
+            # 对于要更新的文件，先查询现有 cell_text 以便保留
+            old_cell_texts = {}  # (file_id, sheet_name) -> cell_text
+            update_file_ids = []
+            for filename, filepath, mtime, sheet_names in updates:
+                existing = indexed.get(filepath)
+                if existing is not None:
+                    update_file_ids.append(existing[0])
+
+            if update_file_ids:
+                placeholders = ','.join('?' * len(update_file_ids))
+                cursor.execute(
+                    f'SELECT file_id, sheet_name, cell_text FROM sheets WHERE file_id IN ({placeholders})',
+                    update_file_ids
+                )
+                for row in cursor.fetchall():
+                    old_cell_texts[(row[0], row[1])] = row[2]
+
+            for filename, filepath, mtime, sheet_names in updates:
+                existing = indexed.get(filepath)
+                if existing is not None:
+                    file_id = existing[0]
+                    cursor.execute(
+                        'UPDATE xlsx_files SET filename=?, modified_time=?, sheet_count=? WHERE id=?',
+                        (filename, mtime, len(sheet_names), file_id)
+                    )
+                    file_ids_to_clear.append(file_id)
+                    updated += 1
+                else:
+                    cursor.execute(
+                        'INSERT INTO xlsx_files (filename, filepath, modified_time, sheet_count) VALUES (?, ?, ?, ?)',
+                        (filename, filepath, mtime, len(sheet_names))
+                    )
+                    file_id = cursor.lastrowid
+                    added += 1
+                for sheet_name in sheet_names:
+                    preserved = old_cell_texts.get((file_id, sheet_name))
+                    sheet_inserts.append((file_id, sheet_name, preserved))
+
+            if file_ids_to_clear:
+                placeholders = ','.join('?' * len(file_ids_to_clear))
+                cursor.execute(
+                    f'DELETE FROM sheets WHERE file_id IN ({placeholders})',
+                    file_ids_to_clear
+                )
+
+            if sheet_inserts:
+                cursor.executemany(
+                    'INSERT INTO sheets (file_id, sheet_name, cell_text) VALUES (?, ?, ?)',
+                    sheet_inserts
+                )
+
+            conn.commit()
+            return added, updated
+        finally:
+            conn.close()
 
     def delete_file(self, filepath: str):
         """从索引中删除文件"""
@@ -127,6 +238,22 @@ class IndexManager:
             cursor.execute('DELETE FROM xlsx_files WHERE id = ?', (file_id,))
         conn.commit()
         conn.close()
+
+    def delete_files_by_ids(self, file_ids: List[int]) -> int:
+        """按 id 批量删除文件（及其子表），单事务。返回删除条数。"""
+        if not file_ids:
+            return 0
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.cursor()
+            cursor.execute('PRAGMA synchronous=NORMAL')
+            placeholders = ','.join('?' * len(file_ids))
+            cursor.execute(f'DELETE FROM sheets WHERE file_id IN ({placeholders})', file_ids)
+            cursor.execute(f'DELETE FROM xlsx_files WHERE id IN ({placeholders})', file_ids)
+            conn.commit()
+            return len(file_ids)
+        finally:
+            conn.close()
 
     def get_all_files(self) -> List[Dict]:
         """获取所有已索引的文件"""
@@ -339,8 +466,11 @@ class IndexManager:
         conn.commit()
         conn.close()
 
-    def update_sheet_cell_texts_batch(self, updates: List[Tuple[int, str]]):
-        """批量更新 sheet 的 cell_text（单事务，一次连接）"""
+    def update_sheet_cell_texts_batch(self, updates: List[Tuple[str, int]]):
+        """批量更新 sheet 的 cell_text（单事务，一次连接）
+
+        updates: [(cell_text, sheet_id), ...]
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.executemany('UPDATE sheets SET cell_text = ? WHERE id = ?', updates)

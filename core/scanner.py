@@ -1,6 +1,6 @@
 """xlsx/xls文件扫描器 - 递归扫描目录并提取子表名称"""
 import os
-import time
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Callable
@@ -10,6 +10,10 @@ import xlrd
 
 # XML 命名空间
 NS = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+# 编译正则：从 xl/workbook.xml 直接提取 sheet name，比 DOM 解析快 2-3x
+# 格式: <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+_SHEET_NAME_RE = re.compile(rb'<sheet\s[^>]*?name="([^"]*)"')
 
 class XlsxScanner:
     def __init__(self, max_workers: int = 8):
@@ -61,18 +65,27 @@ class XlsxScanner:
             return self._get_sheet_names_xls(filepath)
 
         try:
-            # xlsx/xlsm 是 zip 文件，直接读取 workbook.xml 获取 sheet 名称
+            # xlsx/xlsm 是 zip 文件，用正则直接从 workbook.xml 提取 sheet 名
+            # 比 ET.parse 快 2-3x，workbook.xml 结构简单固定无需 DOM
             with zipfile.ZipFile(filepath, 'r') as zf:
-                with zf.open('xl/workbook.xml') as f:
-                    tree = ET.parse(f)
-                    root = tree.getroot()
-                    sheets = root.findall('.//main:sheet', NS)
-                    if sheets:
-                        return [s.get('name', f'Sheet{i+1}') for i, s in enumerate(sheets)]
+                raw = zf.read('xl/workbook.xml')
+                names = [name.decode('utf-8') for name in _SHEET_NAME_RE.findall(raw)]
+                if names:
+                    return names
             return []
-        except Exception as e:
-            # 备用方案：使用 openpyxl
-            return self._get_sheet_names_slow(filepath)
+        except Exception:
+            # 正则失败时回退到 DOM 解析（处理非标准格式），最后尝试 openpyxl
+            try:
+                with zipfile.ZipFile(filepath, 'r') as zf:
+                    with zf.open('xl/workbook.xml') as f:
+                        tree = ET.parse(f)
+                        root = tree.getroot()
+                        sheets = root.findall('.//main:sheet', NS)
+                        if sheets:
+                            return [s.get('name', f'Sheet{i+1}') for i, s in enumerate(sheets)]
+                return []
+            except Exception:
+                return self._get_sheet_names_slow(filepath)
 
     def _get_sheet_names_xls(self, filepath: str) -> List[str]:
         """使用 xlrd 获取 .xls 文件的子表名称"""
@@ -104,6 +117,16 @@ class XlsxScanner:
         if self._is_xls_format(filepath):
             return self._extract_cell_texts_xls(filepath, sheet_names, max_chars_per_sheet)
 
+        # 跳过超大文件（>200MB），避免 OOM
+        try:
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        except OSError:
+            file_size_mb = 0
+        if file_size_mb > 200:
+            print(f"警告: 跳过超大文件 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)，避免内存溢出")
+            return [''] * len(sheet_names)
+
+        wb = None
         try:
             wb = load_workbook(filepath, read_only=True, data_only=True)
             results = []
@@ -125,15 +148,21 @@ class XlsxScanner:
                     if char_count > max_chars_per_sheet:
                         break
                 results.append(' '.join(parts))
-            wb.close()
             return results
-        except Exception as e:
-            print(f"警告: 提取单元格文本失败 {filepath}: {e}")
+        except MemoryError:
+            print(f"警告: 提取单元格文本内存不足 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)")
             return [''] * len(sheet_names)
+        except Exception as e:
+            print(f"警告: 提取单元格文本失败 {os.path.basename(filepath)}: {e}")
+            return [''] * len(sheet_names)
+        finally:
+            if wb is not None:
+                wb.close()
 
     def _extract_cell_texts_xls(self, filepath: str, sheet_names: List[str],
                                  max_chars_per_sheet: int = 50000) -> List[str]:
         """xlrd 版本：提取 .xls 文件的单元格内容"""
+        wb = None
         try:
             wb = xlrd.open_workbook(filepath, on_demand=True)
             results = []
@@ -156,11 +185,16 @@ class XlsxScanner:
                     if char_count > max_chars_per_sheet:
                         break
                 results.append(' '.join(parts))
-            wb.release_resources()
             return results
-        except Exception as e:
-            print(f"警告: 提取 .xls 单元格文本失败 {filepath}: {e}")
+        except MemoryError:
+            print(f"警告: 提取 .xls 单元格文本内存不足 {os.path.basename(filepath)}")
             return [''] * len(sheet_names)
+        except Exception as e:
+            print(f"警告: 提取 .xls 单元格文本失败 {os.path.basename(filepath)}: {e}")
+            return [''] * len(sheet_names)
+        finally:
+            if wb is not None:
+                wb.release_resources()
 
     def read_sheet_preview(self, filepath: str, sheet_name: str,
                            max_rows: int = 20, max_cols: int = 50,
@@ -293,128 +327,98 @@ class XlsxScanner:
             print(f"警告: 查找 .xls 命中单元格失败 {filepath}: {e}")
             return []
 
-    def scan_file(self, filepath: str) -> Tuple[str, float, List[str]] | None:
-        """扫描单个文件，返回(文件名, 修改时间, 子表列表)"""
-        if not self.is_xlsx_file(filepath):
-            return None
-
-        try:
-            stat = os.stat(filepath)
-            modified_time = stat.st_mtime
-            filename = os.path.basename(filepath)
-            sheet_names = self.get_sheet_names(filepath)
-            return (filename, modified_time, sheet_names)
-        except Exception as e:
-            print(f"警告: 扫描文件失败 {filepath}: {e}")
-            return None
-
-    def scan_directory(self, directory: str, progress_callback: Callable = None) -> List[Tuple[str, str, float, List[str]]]:
-        """
-        递归扫描目录下的所有xlsx文件
-        返回: [(filename, filepath, modified_time, sheet_names), ...]
-        """
-        results = []
-
-        for root, dirs, files in os.walk(directory):
-            # 跳过隐藏目录
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-
-            for filename in files:
-                if not self.is_xlsx_file(filename):
-                    continue
-
-                filepath = os.path.join(root, filename)
-                result = self.scan_file(filepath)
-
-                if result:
-                    results.append((result[0], filepath, result[1], result[2]))
-
-                if progress_callback:
-                    progress_callback(len(results))
-
-        return results
-
     def scan_directory_incremental(self, directory: str, index_manager, progress_callback: Callable = None) -> Tuple[int, int, int]:
         """
         增量扫描目录，只更新有变化的文件（多线程并发）
         返回: (新增文件数, 更新文件数, 删除文件数)
         """
-        # 获取所有需要扫描的文件
+        # 1) scandir 走树，收集 (filepath -> mtime)。
+        #    用 DirEntry.stat() 避免每次单独 syscall；scandir 本身比 os.walk 快很多（Windows 上尤其明显）。
         all_files = {}
-        for root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for filename in files:
-                if self.is_xlsx_file(filename):
-                    filepath = os.path.join(root, filename)
-                    all_files[filepath] = True
-
-        # 获取索引中已存在的文件
-        indexed_files = {}
-        for file_info in index_manager.get_all_files():
-            indexed_files[file_info['filepath']] = file_info['modified_time']
-
-        added = 0
-        updated = 0
-        deleted = 0
-
-        # 需要处理的文件列表
-        files_to_process = []
-        for filepath in all_files:
+        for root, entry in self._walk_files(directory):
+            if not self.is_xlsx_file(entry.name):
+                continue
             try:
-                stat = os.stat(filepath)
-                modified_time = stat.st_mtime
-                filename = os.path.basename(filepath)
-                existing = index_manager.get_file_info(filepath)
+                stat = entry.stat()
+            except OSError:
+                continue
+            all_files[os.path.join(root, entry.name)] = stat.st_mtime
 
-                if existing is None:
-                    files_to_process.append((filepath, filename, modified_time, 'add'))
-                elif existing[1] != modified_time:
-                    files_to_process.append((filepath, filename, modified_time, 'update'))
-            except Exception as e:
-                print(f"警告: 获取文件信息失败 {filepath}: {e}")
+        # 2) 一次查询拿到当前索引快照，避免 N 次回查
+        indexed = index_manager.get_all_files_indexed()
 
-        # 收集需要写入索引的数据
-        pending_updates = []  # [(filepath, filename, modified_time, sheet_names), ...]
+        # 3) 找出需要处理的文件，按目录排序以提升磁盘局部性
+        #    同一目录的文件在磁盘上通常相邻，顺序读取可减少 HDD 寻道、改善 SSD 预读命中
+        files_to_process = []
+        for filepath, mtime in all_files.items():
+            existing = indexed.get(filepath)
+            if existing is None or existing[1] != mtime:
+                files_to_process.append((filepath, os.path.basename(filepath), mtime))
+        files_to_process.sort(key=lambda x: x[0])  # 按完整路径排序（等同于按目录+文件排序）
 
-        # 并发处理文件
+        # 4) 并发提取 sheet 名（进度每 16 个文件上报一次，减少 GUI 信号开销）
         total_files = len(files_to_process)
         if progress_callback:
             progress_callback(0, total_files)
 
+        pending_updates = []
         if files_to_process:
             processed = 0
+            _PROGRESS_INTERVAL = 16  # 批量进度间隔
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = {
-                    executor.submit(self.get_sheet_names, filepath): (filepath, filename, modified_time)
-                    for filepath, filename, modified_time, op_type in files_to_process
+                    executor.submit(self.get_sheet_names, fp): (fp, fn, mt)
+                    for fp, fn, mt in files_to_process
                 }
 
                 for future in as_completed(futures):
-                    filepath, filename, modified_time = futures[future]
+                    fp, fn, mt = futures[future]
                     processed += 1
                     try:
                         sheet_names = future.result()
                         if sheet_names:
-                            pending_updates.append((filename, filepath, modified_time, sheet_names))
+                            pending_updates.append((fn, fp, mt, sheet_names))
                     except Exception as e:
-                        print(f"警告: 处理文件失败 {filepath}: {e}")
+                        print(f"警告: 处理文件失败 {fp}: {e}")
                     finally:
-                        if progress_callback:
+                        if progress_callback and (
+                            processed % _PROGRESS_INTERVAL == 0 or processed == total_files
+                        ):
                             progress_callback(processed, total_files)
 
-        # 主线程写入数据库（线程安全）
-        for filename, filepath, modified_time, sheet_names in pending_updates:
-            index_manager.add_file(filename, filepath, modified_time, sheet_names)
-            existing = index_manager.get_file_info(filepath)
-            if existing:
-                updated += 1
-            else:
-                added += 1
+        # 5) 单事务批量写库（一次 commit、一次 fsync）
+        added, updated = index_manager.upsert_files_batch(pending_updates, indexed)
 
-        # 处理已删除的文件
-        for filepath in indexed_files:
-            if filepath not in all_files:
-                index_manager.delete_file(filepath)
-                deleted += 1
+        # 6) 索引中存在但磁盘上已消失的文件 → 按 id 批量删除
+        files_on_disk = set(all_files.keys())
+        file_ids_to_delete = [fid for fp, (fid, _) in indexed.items() if fp not in files_on_disk]
+        deleted = index_manager.delete_files_by_ids(file_ids_to_delete)
 
         return (added, updated, deleted)
+
+    @staticmethod
+    def _walk_files(directory: str):
+        """DFS 遍历，跳过隐藏目录，yield (parent_dir, DirEntry)。
+
+        替代 os.walk：scandir 在 Windows 上明显更快，且 DirEntry 已经缓存了
+        findfirst/findnext 的结果，后续 entry.stat() 不需要再发一次 syscall。
+        """
+        stack = [directory]
+        while stack:
+            root = stack.pop()
+            try:
+                with os.scandir(root) as it:
+                    subdirs = []
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                if not entry.name.startswith('.'):
+                                    subdirs.append(entry.path)
+                            else:
+                                yield root, entry
+                        except OSError:
+                            continue
+                    for sub in reversed(subdirs):
+                        stack.append(sub)
+            except (PermissionError, FileNotFoundError, NotADirectoryError, OSError):
+                continue

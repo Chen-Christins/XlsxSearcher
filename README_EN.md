@@ -26,6 +26,8 @@ Excel Config Table Search Tool — Quickly locate sheets and cell data in xlsx/x
 - 📤 **Export CSV**: Export current search results to a CSV file
 - ⚡ **Index Acceleration**: Builds SQLite index on first scan for millisecond-level search responses
 - 🔄 **Incremental Update**: Re-scan only updates changed files
+- 🚀 **Optimized Performance**: Multi-round optimization for scanning and deep indexing, efficiently handling tens of thousands of files
+- 🛡️ **Large File Protection**: Deep indexing automatically skips files larger than 200MB to prevent out-of-memory errors
 - 💾 **Preference Persistence**: Remembers last scanned directory, match mode, sort order, and view mode
 - 🗜️ **Collapse Preview**: Use `Ctrl+`` shortcut or button to collapse/expand the preview panel
 

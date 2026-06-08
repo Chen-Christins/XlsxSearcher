@@ -28,9 +28,7 @@ def _read_text_with_fallbacks(file_path: str) -> str:
                 return file.read()
         except UnicodeDecodeError as error:
             last_error = error
-    if last_error:
-        raise last_error
-    raise UnicodeDecodeError('utf-8', b'', 0, 1, 'unable to decode file')
+    raise last_error or UnicodeDecodeError('utf-8', b'', 0, 1, 'unable to decode file')
 
 
 def _is_comment(line: str) -> bool:

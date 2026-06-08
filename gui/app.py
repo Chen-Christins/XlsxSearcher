@@ -19,6 +19,24 @@ from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
 
 
+def _msgbox(parent, level, title, text, buttons=QMessageBox.Ok, default_button=None):
+    """统一的 QMessageBox 封装，使用应用图标。
+
+    level: 'info' | 'warn' | 'error' | 'question'（保留参数以便兼容）
+    返回: 与 QMessageBox 静态方法一致的按钮常量。
+    """
+    app_icon = QApplication.windowIcon()
+    msg = QMessageBox(parent)
+    if not app_icon.isNull():
+        msg.setIconPixmap(app_icon.pixmap(64, 64))
+    msg.setWindowTitle(title)
+    msg.setText(text)
+    msg.setStandardButtons(buttons)
+    if default_button is not None:
+        msg.setDefaultButton(default_button)
+    return msg.exec_()
+
+
 class ScanWorker(QThread):
     """扫描工作线程"""
     finished = pyqtSignal(int, int, int, float)  # added, updated, deleted, duration
@@ -75,8 +93,8 @@ class DeepIndexWorker(QThread):
             for entry in pending:
                 by_file[entry['filepath']].append(entry)
 
-            # 并行处理：4 线程并发，每个文件独立打开 openpyxl
-            max_workers = min(4, len(by_file))
+            # 并行处理：2 线程并发（openpyxl 内存占用高，太高并发容易 OOM）
+            max_workers = min(2, len(by_file))
             processed = 0
 
             # 每个线程用自己的 scanner 实例（避免 openpyxl 线程竞争）
@@ -85,7 +103,7 @@ class DeepIndexWorker(QThread):
             def _extract(fp, names, ids):
                 s = ScannerCls()
                 texts = s.extract_cell_texts(fp, names)
-                return [(sid, text) for sid, text in zip(ids, texts) if text]
+                return [(text, sid) for sid, text in zip(ids, texts)]
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
@@ -95,6 +113,7 @@ class DeepIndexWorker(QThread):
                     future = executor.submit(_extract, filepath, sheet_names, sheet_ids)
                     futures[future] = (filepath, len(entries))
 
+                errors = []
                 for future in as_completed(futures):
                     filepath, count = futures[future]
                     try:
@@ -103,8 +122,15 @@ class DeepIndexWorker(QThread):
                             self.index_manager.update_sheet_cell_texts_batch(updates)
                     except Exception as e:
                         print(f"警告: 深度索引文件失败 {filepath}: {e}")
+                        errors.append(f"{os.path.basename(filepath)}: {e}")
                     processed += count
                     self.progress.emit(processed, total)
+
+                if errors:
+                    summary = f"{len(errors)} 个文件深度索引失败:\n" + "\n".join(errors[:5])
+                    if len(errors) > 5:
+                        summary += f"\n...及其他 {len(errors) - 5} 个"
+                    self.error.emit(summary)
 
             self.finished.emit(processed, total, time.time() - start)
         except Exception as e:
@@ -125,6 +151,11 @@ class SearchWorker(QThread):
         self.filename_keyword = filename_keyword
         self.cell_keyword = cell_keyword
         self.match_mode = match_mode
+        self._cancelled = False
+
+    def cancel(self):
+        """标记取消，run() 完成后不发射结果"""
+        self._cancelled = True
 
     def run(self):
         try:
@@ -135,9 +166,11 @@ class SearchWorker(QThread):
                     self.sheet_keyword, self.filename_keyword,
                     self.cell_keyword, self.match_mode
                 )
-            self.finished.emit(results)
+            if not self._cancelled:
+                self.finished.emit(results)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._cancelled:
+                self.error.emit(str(e))
 
 
 class XlsxSearcherApp(QMainWindow):
@@ -160,6 +193,7 @@ class XlsxSearcherApp(QMainWindow):
         self.search_worker = None
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
+        self._pending_status_prefix = ''
         self.preview_state = {
             'filepath': '',
             'sheet_name': '',
@@ -206,14 +240,18 @@ class XlsxSearcherApp(QMainWindow):
 
         # 顶部搜索区域
         top_widget = QWidget()
-        top_widget.installEventFilter(self)  # 用于 macOS 窗口拖拽
         top_layout = QHBoxLayout(top_widget)
-        top_layout.setContentsMargins(80, 5, 10, 5)
+        if sys.platform == 'darwin':
+            top_widget.installEventFilter(self)  # 用于 macOS 窗口拖拽
+            top_layout.setContentsMargins(80, 5, 10, 5)
+        else:
+            top_layout.setContentsMargins(10, 5, 10, 5)
         main_layout.addWidget(top_widget)
 
         # 目录选择和显示
         self.dir_label = QLabel("未选择目录")
         self.dir_label.setStyleSheet("color: gray")
+        self.dir_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         top_layout.addWidget(QLabel("扫描目录:"))
         top_layout.addWidget(self.dir_label)
         top_layout.addWidget(QPushButton("选择目录", clicked=self._select_directory))
@@ -613,9 +651,8 @@ class XlsxSearcherApp(QMainWindow):
         try:
             mappings = parse_sheet_alias_file(file_path)
             if not mappings:
-                QMessageBox.warning(
-                    self,
-                    '提示',
+                _msgbox(
+                    self, 'warn', '提示',
                     '未在该文件中解析到有效映射。\n'
                     '标准格式: 英文配置名 子表名1 子表名2 ...\n'
                     '示例: TextConfig 界面文本 UI Text\n'
@@ -628,18 +665,17 @@ class XlsxSearcherApp(QMainWindow):
             self.status_bar.showMessage(
                 f"已导入映射：{imported_count} 条，当前共 {stats['alias_count']} 个英文名 / {stats['mapping_count']} 条映射"
             )
-            QMessageBox.information(
-                self,
-                '导入成功',
+            _msgbox(
+                self, 'info', '导入成功',
                 f'已从以下文件导入映射:\n{file_path}\n\n'
                 f'本次导入 {imported_count} 条映射。\n'
                 f'现在可以直接用英文配置名搜索对应子表。'
             )
             self._do_search()
         except UnicodeDecodeError:
-            QMessageBox.critical(self, '错误', '文件编码无法识别，请先保存为 UTF-8 编码后再导入')
+            _msgbox(self, 'error', '错误', '文件编码无法识别，请先保存为 UTF-8 编码后再导入')
         except Exception as e:
-            QMessageBox.critical(self, '错误', f'导入映射失败: {e}')
+            _msgbox(self, 'error', '错误', f'导入映射失败: {e}')
 
     def _restore_search_history(self):
         """恢复最近搜索历史"""
@@ -726,6 +762,8 @@ class XlsxSearcherApp(QMainWindow):
         """重新扫描"""
         if self.scan_directory:
             self._start_scan()
+        else:
+            _msgbox(self, 'info', '提示', '请先选择要扫描的目录')
 
     def _start_scan(self):
         """开始扫描（在线程中执行）"""
@@ -776,15 +814,15 @@ class XlsxSearcherApp(QMainWindow):
         # 执行初始搜索
         self._do_search()
         self._refresh_index_status_label()
-        self._update_status_summary(prefix=f"索引完成，耗时 {time_str}")
+        self._pending_status_prefix = f"索引完成，耗时 {time_str}"
 
     def _on_scan_error(self, error_msg):
-        """扫描错误回调"""
+        """扫描/深度索引错误回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
         self._refresh_index_status_label()
-        self.status_bar.showMessage("扫描出错")
-        QMessageBox.critical(self, "错误", f"扫描失败: {error_msg}")
+        self.status_bar.showMessage("操作出错")
+        _msgbox(self, 'error', '错误', f'操作失败: {error_msg}')
 
     def _start_deep_index(self):
         """启动深度索引（提取单元格内容）"""
@@ -808,20 +846,29 @@ class XlsxSearcherApp(QMainWindow):
         """深度索引完成回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
-        if total == 0:
-            self.status_bar.showMessage("所有文件已完成深度索引")
+
+        # 格式化耗时（与扫描一致，通过 _pending_status_prefix 传递到最终状态栏）
+        if duration >= 60:
+            time_str = f"{duration / 60:.1f}分钟"
+        elif duration >= 1:
+            time_str = f"{duration:.1f}秒"
         else:
-            self.status_bar.showMessage(
-                f"深度索引完成：已处理 {processed}/{total} 个子表，耗时 {duration:.1f}秒"
+            time_str = f"{duration * 1000:.0f}毫秒"
+
+        if total == 0:
+            self._pending_status_prefix = "深度索引已是最新"
+        else:
+            self._pending_status_prefix = (
+                f"深度索引完成：已处理 {processed}/{total} 个子表，耗时 {time_str}"
             )
         self._refresh_index_status_label()
         self._do_search()
 
     def _clear_index(self):
         """清空索引"""
-        reply = QMessageBox.question(
-            self, "确认", "确定要清空所有索引数据吗？"
-        )
+        reply = _msgbox(self, 'question', '确认', '确定要清空所有索引数据吗？',
+                        buttons=QMessageBox.Yes | QMessageBox.No,
+                        default_button=QMessageBox.No)
         if reply == QMessageBox.Yes:
             self.index_manager.clear_index()
             self.search_results = []
@@ -836,12 +883,11 @@ class XlsxSearcherApp(QMainWindow):
 
     def _do_search(self):
         """在后台线程执行搜索，避免阻塞 UI"""
-        # 取消上一次未完成的搜索
+        # 取消上一次未完成的搜索（协作式：旧线程自行结束，不阻塞 UI）
         if self.search_worker and self.search_worker.isRunning():
             self.search_worker.finished.disconnect(self._on_search_finished)
             self.search_worker.error.disconnect(self._on_search_error)
-            self.search_worker.terminate()
-            self.search_worker.wait()
+            self.search_worker.cancel()
 
         sheet_keyword = self.sheet_entry.text().strip()
         filename_keyword = self.filename_entry.text().strip()
@@ -865,7 +911,7 @@ class XlsxSearcherApp(QMainWindow):
 
     def _on_search_error(self, error_msg):
         """后台搜索出错"""
-        QMessageBox.critical(self, '搜索错误', f'搜索失败: {error_msg}')
+        _msgbox(self, 'error', '搜索错误', f'搜索失败: {error_msg}')
 
     def _on_search_committed(self):
         """仅在用户明确完成输入后写入搜索历史"""
@@ -875,7 +921,7 @@ class XlsxSearcherApp(QMainWindow):
         match_mode = self.match_mode_combo.currentData()
         self._record_search_history(sheet_keyword, filename_keyword, cell_keyword, match_mode)
 
-    def _update_results(self):
+    def _update_results(self, status_prefix=None):
         """更新搜索结果表格"""
         self.result_tree.clear()
         self._reset_preview_state()
@@ -891,7 +937,9 @@ class XlsxSearcherApp(QMainWindow):
         else:
             self._update_grouped_results()
 
-        self._update_status_summary()
+        effective_prefix = status_prefix if status_prefix is not None else self._pending_status_prefix
+        self._pending_status_prefix = ''
+        self._update_status_summary(prefix=effective_prefix)
 
     def _update_grouped_results(self):
         """按文件分组展示结果"""
@@ -1277,9 +1325,9 @@ class XlsxSearcherApp(QMainWindow):
             try:
                 open_file(filepath)
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"无法打开文件: {e}")
+                _msgbox(self, 'error', '错误', f'无法打开文件: {e}')
         else:
-            QMessageBox.warning(self, "警告", "文件不存在或已被移动")
+            _msgbox(self, 'warn', '警告', '文件不存在或已被移动')
 
     def _locate_file(self):
         """在资源管理器中定位文件"""
@@ -1288,25 +1336,25 @@ class XlsxSearcherApp(QMainWindow):
             try:
                 open_in_explorer(filepath)
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"无法定位文件: {e}")
+                _msgbox(self, 'error', '错误', f'无法定位文件: {e}')
         else:
-            QMessageBox.warning(self, "警告", "文件不存在或已被移动")
+            _msgbox(self, 'warn', '警告', '文件不存在或已被移动')
 
     def _copy_path(self):
         """复制文件路径"""
         filepath = self._get_selected_filepath()
         if filepath:
             if copy_to_clipboard(filepath):
-                QMessageBox.information(self, "成功", "路径已复制到剪贴板")
+                _msgbox(self, 'info', '成功', '路径已复制到剪贴板')
             else:
-                QMessageBox.critical(self, "错误", "复制失败")
+                _msgbox(self, 'error', '错误', '复制失败')
         else:
-            QMessageBox.warning(self, "警告", "请先选择文件")
+            _msgbox(self, 'warn', '警告', '请先选择文件')
 
     def _export_results(self):
         """导出当前搜索结果为 CSV"""
         if not self.search_results:
-            QMessageBox.information(self, "提示", "当前没有可导出的搜索结果")
+            _msgbox(self, 'info', '提示', '当前没有可导出的搜索结果')
             return
 
         default_path = os.path.join(os.path.expanduser('~'), 'xlsx_search_results.csv')
@@ -1344,9 +1392,9 @@ class XlsxSearcherApp(QMainWindow):
                     ])
 
             self.status_bar.showMessage(f'已导出 {len(self.search_results)} 个文件到 {file_path}')
-            QMessageBox.information(self, '成功', f'搜索结果已导出到:\n{file_path}')
+            _msgbox(self, 'info', '成功', f'搜索结果已导出到:\n{file_path}')
         except Exception as e:
-            QMessageBox.critical(self, '错误', f'导出失败: {e}')
+            _msgbox(self, 'error', '错误', f'导出失败: {e}')
 
     def _truncate_path(self, path, max_length=50):
         """截断路径显示"""
