@@ -1106,8 +1106,22 @@ class XlsxSearcherApp(QMainWindow):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
         header.setStretchLastSection(False)
 
+        try:
+            hdr_data = self.scanner.read_sheet_preview(
+                filepath, sheet_name, max_rows=1, max_cols=50,
+                start_row=1, start_col=start_col,
+            )
+            hdr_row = hdr_data[0] if hdr_data else []
+        except Exception:
+            hdr_row = []
+
         from openpyxl.utils import get_column_letter
-        headers = [get_column_letter(start_col + i) for i in range(num_cols)]
+        headers = []
+        for i in range(num_cols):
+            if i < len(hdr_row) and hdr_row[i].strip():
+                headers.append(hdr_row[i])
+            else:
+                headers.append(get_column_letter(start_col + i))
         self.preview_table.setHorizontalHeaderLabels(headers)
         self.preview_table.setVerticalHeaderLabels([str(start_row + i) for i in range(num_rows)])
 
