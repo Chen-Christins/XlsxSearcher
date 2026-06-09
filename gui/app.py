@@ -1069,19 +1069,20 @@ class XlsxSearcherApp(QMainWindow):
             self._clear_preview(message="预览: 文件不存在或已被移动")
             return
 
-        self.preview_state['start_row'] = start_row
+        # When start_row is 1, skip row 1 since it's already used as column header
+        data_start_row = start_row if start_row > 1 else 2
+        self.preview_state['start_row'] = data_start_row
         self.preview_state['start_col'] = start_col
         self.preview_label.setText(self._build_preview_label(filepath, sheet_name))
         self.status_bar.showMessage("正在加载预览...")
         QApplication.processEvents()
-
         try:
             data = self.scanner.read_sheet_preview(
                 filepath,
                 sheet_name,
                 max_rows=20,
                 max_cols=50,
-                start_row=start_row,
+                start_row=data_start_row,
                 start_col=start_col,
             )
         except Exception as e:
@@ -1123,7 +1124,7 @@ class XlsxSearcherApp(QMainWindow):
             else:
                 headers.append(get_column_letter(start_col + i))
         self.preview_table.setHorizontalHeaderLabels(headers)
-        self.preview_table.setVerticalHeaderLabels([str(start_row + i) for i in range(num_rows)])
+        self.preview_table.setVerticalHeaderLabels([str(data_start_row + i) for i in range(num_rows)])
 
         window_hits = self._get_window_hit_positions(num_rows, num_cols)
         current_hit_position = self._get_current_window_hit_position()
