@@ -1032,16 +1032,19 @@ class XlsxSearcherApp(QMainWindow):
         if filepath and sheet_name:
             search_keyword = self.preview_search_entry.text().strip() or self.cell_entry.text().strip()
             match_mode = self.match_mode_combo.currentData()
-            hits = []
-            current_hit_index = -1
-            start_row = 1
-            start_col = 1
 
-            if search_keyword:
-                hits = self.scanner.find_sheet_matches(filepath, sheet_name, search_keyword, match_mode)
-                if hits:
-                    current_hit_index = 0
-                    start_row, start_col = self._compute_preview_start(hits[0])
+            # 一次文件打开：命中查找 + 预览数据 + 表头
+            hits, preview_data, header_row = self.scanner.read_sheet_with_hits(
+                filepath, sheet_name,
+                keyword=search_keyword or None,
+                match_mode=match_mode,
+            )
+
+            current_hit_index = 0 if hits else -1
+            if hits:
+                start_row, start_col = self._compute_preview_start(hits[0])
+            else:
+                start_row, start_col = 2, 1
 
             self.preview_state.update({
                 'filepath': filepath,
@@ -1057,38 +1060,20 @@ class XlsxSearcherApp(QMainWindow):
             self.preview_search_entry.setText(search_keyword)
             self.preview_search_entry.blockSignals(False)
             self._update_preview_controls()
-            self._update_preview(filepath, sheet_name, start_row=start_row, start_col=start_col)
+            data_start_row = start_row if start_row > 1 else 2
+            self._render_preview_table(filepath, sheet_name, preview_data, header_row,
+                                       data_start_row, start_col)
             return
 
         self._reset_preview_state()
         self._clear_preview(message="预览: 请选择一个子表")
 
-    def _update_preview(self, filepath, sheet_name, start_row=1, start_col=1):
-        """加载预览面板：读取 sheet 前 20 行数据并填充表格"""
-        if not filepath or not os.path.exists(filepath):
-            self._clear_preview(message="预览: 文件不存在或已被移动")
-            return
-
-        # When start_row is 1, skip row 1 since it's already used as column header
-        data_start_row = start_row if start_row > 1 else 2
+    def _render_preview_table(self, filepath, sheet_name, data, header_row,
+                               data_start_row, start_col):
+        """将已加载的数据渲染到预览表格（不读文件）。"""
         self.preview_state['start_row'] = data_start_row
         self.preview_state['start_col'] = start_col
         self.preview_label.setText(self._build_preview_label(filepath, sheet_name))
-        self.status_bar.showMessage("正在加载预览...")
-        QApplication.processEvents()
-        try:
-            data = self.scanner.read_sheet_preview(
-                filepath,
-                sheet_name,
-                max_rows=20,
-                max_cols=50,
-                start_row=data_start_row,
-                start_col=start_col,
-            )
-        except Exception as e:
-            self._clear_preview(message=f"预览: 读取失败 - {e}")
-            self.status_bar.showMessage("预览加载失败")
-            return
 
         if not data:
             self._clear_preview(message=f"预览: {sheet_name} (空表)")
@@ -1107,24 +1092,17 @@ class XlsxSearcherApp(QMainWindow):
             header.setSectionResizeMode(col, QHeaderView.Interactive)
         header.setStretchLastSection(False)
 
-        try:
-            hdr_data = self.scanner.read_sheet_preview(
-                filepath, sheet_name, max_rows=1, max_cols=50,
-                start_row=1, start_col=start_col,
-            )
-            hdr_row = hdr_data[0] if hdr_data else []
-        except Exception:
-            hdr_row = []
-
         from openpyxl.utils import get_column_letter
         headers = []
         for i in range(num_cols):
-            if i < len(hdr_row) and hdr_row[i].strip():
-                headers.append(hdr_row[i])
+            if i < len(header_row) and header_row[i].strip():
+                headers.append(header_row[i])
             else:
                 headers.append(get_column_letter(start_col + i))
         self.preview_table.setHorizontalHeaderLabels(headers)
-        self.preview_table.setVerticalHeaderLabels([str(data_start_row + i) for i in range(num_rows)])
+        self.preview_table.setVerticalHeaderLabels(
+            [str(data_start_row + i) for i in range(num_rows)]
+        )
 
         window_hits = self._get_window_hit_positions(num_rows, num_cols)
         current_hit_position = self._get_current_window_hit_position()
@@ -1144,6 +1122,30 @@ class XlsxSearcherApp(QMainWindow):
 
         self.status_bar.showMessage("就绪")
 
+    def _update_preview(self, filepath, sheet_name, start_row=1, start_col=1):
+        """加载预览面板：读取 sheet 数据并渲染。用于命中跳转等已有 hits 的场景。"""
+        if not filepath or not os.path.exists(filepath):
+            self._clear_preview(message="预览: 文件不存在或已被移动")
+            return
+
+        data_start_row = start_row if start_row > 1 else 2
+        self.status_bar.showMessage("正在加载预览...")
+        QApplication.processEvents()
+        try:
+            _, preview_data, header_row = self.scanner.read_sheet_with_hits(
+                filepath, sheet_name,
+                keyword=None,
+                start_row=data_start_row,
+                start_col=start_col,
+            )
+        except Exception as e:
+            self._clear_preview(message=f"预览: 读取失败 - {e}")
+            self.status_bar.showMessage("预览加载失败")
+            return
+
+        self._render_preview_table(filepath, sheet_name, preview_data, header_row,
+                                   data_start_row, start_col)
+
     def _search_within_preview(self):
         """在当前预览的 sheet 内重新搜索并跳到首个命中。"""
         filepath = self.preview_state.get('filepath')
@@ -1153,11 +1155,19 @@ class XlsxSearcherApp(QMainWindow):
 
         keyword = self.preview_search_entry.text().strip()
         match_mode = self.match_mode_combo.currentData()
-        hits = self.scanner.find_sheet_matches(filepath, sheet_name, keyword, match_mode) if keyword else []
+
+        # 一次文件打开：命中查找 + 预览数据 + 表头
+        hits, preview_data, header_row = self.scanner.read_sheet_with_hits(
+            filepath, sheet_name,
+            keyword=keyword or None,
+            match_mode=match_mode,
+        )
+
         current_hit_index = 0 if hits else -1
-        start_row, start_col = (1, 1)
         if hits:
             start_row, start_col = self._compute_preview_start(hits[0])
+        else:
+            start_row, start_col = 2, 1
 
         self.preview_state.update({
             'hits': hits,
@@ -1166,7 +1176,9 @@ class XlsxSearcherApp(QMainWindow):
             'start_row': start_row,
             'start_col': start_col,
         })
-        self._update_preview(filepath, sheet_name, start_row=start_row, start_col=start_col)
+        data_start_row = start_row if start_row > 1 else 2
+        self._render_preview_table(filepath, sheet_name, preview_data, header_row,
+                                   data_start_row, start_col)
 
     def _goto_prev_preview_hit(self):
         """跳到上一个命中。"""
