@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-06-20
+
+## What's Changed
+
+### Added
+- 新增 **python-calamine 加速解析**（Rust 级 XML 解析），单元格内容提取和 sheet 预览读取速度提升 5-10 倍，openpyxl 作为自动回退
+- 新增 **CLAUDE.md** AI 开发指引文档，记录项目架构、线程模型、数据流和关键实现细节
+
+### Improved
+- **预览表头改进**：预览表格横表头（列标题）从原本仅显示列字母（A/B/C...）改为优先使用 Excel 第 1 行实际单元格内容作为表头，无内容时回退为列字母
+- **文件 I/O 合并优化**：`find_sheet_matches`（命中查找）和 `read_sheet_preview`（预览读取）合并为单次文件打开的 `read_sheet_with_hits`，一次加载同时返回命中、预览数据和表头，减少重复 open/parse 开销
+- 预览渲染逻辑拆分为 `_render_preview_table`（纯数据→表格渲染），与 `_update_preview`（数据加载→渲染）职责分离
+
+### Fixed
+- 修复预览面板表头缺失问题 — `_update_preview` 原先只显示列字母，未读取 Excel 首行作为实际列标题
+- 修复预览 1-20 行与表头重复的问题 — 数据起始行统一从 row 2 开始（跳过表头行），避免首行数据与表头重复显示
+- 修复预览内搜索（`_search_within_preview`）和命中跳转（`_goto_*_preview_hit`）场景下 `find_sheet_matches` + `read_sheet_preview` 先后各打开一次文件的问题，改为一次 `read_sheet_with_hits` 调用
+
+### Changed
+- CI 触发范围调整：移除 `hotfix/*` 和 `feature/*` 分支的 push 触发，增加 `pull_request` 到 `master` 的触发，确立 master 为发布分支
+
 ## [1.4.0] - 2026-06-08
 
 ## What's Changed
