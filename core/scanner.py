@@ -5,6 +5,13 @@ import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    from python_calamine import CalamineWorkbook
+    HAS_CALAMINE = True
+except ImportError:
+    HAS_CALAMINE = False
+
 from openpyxl import load_workbook
 import xlrd
 
@@ -111,7 +118,7 @@ class XlsxScanner:
                            max_chars_per_sheet: int = 50000) -> List[str]:
         """
         提取每个 sheet 的单元格内容（拼接为字符串），用于索引。
-        打开工作簿一次，遍历所有请求的 sheet。
+        优先使用 calamine（Rust 级解析速度），回退到 openpyxl。
         返回与 sheet_names 平行的字符串列表。
         """
         if self._is_xls_format(filepath):
@@ -126,6 +133,48 @@ class XlsxScanner:
             print(f"警告: 跳过超大文件 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)，避免内存溢出")
             return [''] * len(sheet_names)
 
+        if HAS_CALAMINE:
+            try:
+                return self._extract_cell_texts_calamine(
+                    filepath, sheet_names, max_chars_per_sheet, file_size_mb
+                )
+            except Exception as e:
+                print(f"calamine 提取失败，回退到 openpyxl: {os.path.basename(filepath)}: {e}")
+
+        return self._extract_cell_texts_openpyxl(filepath, sheet_names, max_chars_per_sheet, file_size_mb)
+
+    def _extract_cell_texts_calamine(self, filepath: str, sheet_names: List[str],
+                                      max_chars_per_sheet: int, file_size_mb: float) -> List[str]:
+        """calamine 版本：Rust 级 XML 解析，比 openpyxl 快 5-10x"""
+        wb = CalamineWorkbook.from_path(filepath)
+        results = []
+        for sheet_name in sheet_names:
+            if sheet_name not in wb.sheet_names:
+                results.append('')
+                continue
+            try:
+                sheet = wb.get_sheet_by_name(sheet_name)
+            except (KeyError, ValueError):
+                results.append('')
+                continue
+            parts = []
+            char_count = 0
+            for row in sheet.iter_rows():
+                for cell in row:
+                    if cell is not None and cell != '':
+                        val = str(cell)
+                        parts.append(val)
+                        char_count += len(val) + 1
+                        if char_count > max_chars_per_sheet:
+                            break
+                if char_count > max_chars_per_sheet:
+                    break
+            results.append(' '.join(parts))
+        return results
+
+    def _extract_cell_texts_openpyxl(self, filepath: str, sheet_names: List[str],
+                                      max_chars_per_sheet: int, file_size_mb: float) -> List[str]:
+        """openpyxl 回退版本"""
         wb = None
         try:
             wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -196,15 +245,46 @@ class XlsxScanner:
             if wb is not None:
                 wb.release_resources()
 
+    def _read_sheet_preview_calamine(self, filepath: str, sheet_name: str,
+                                      max_rows: int, max_cols: int,
+                                      start_row: int, start_col: int) -> List[List[str]]:
+        """calamine 版本：读取 sheet 指定窗口数据"""
+        wb = CalamineWorkbook.from_path(filepath)
+        if sheet_name not in wb.sheet_names:
+            return []
+        sheet = wb.get_sheet_by_name(sheet_name)
+        # calamine 的 rows 是懒加载迭代器，手动构建指定窗口切片
+        data = []
+        target_row_end = max(start_row, 1) + max_rows - 1
+        for row_idx, row in enumerate(sheet.iter_rows()):
+            excel_row = row_idx + 1
+            if excel_row < max(start_row, 1):
+                continue
+            if excel_row > target_row_end:
+                break
+            col_start_0 = max(start_col, 1) - 1
+            col_end_0 = col_start_0 + max_cols
+            sliced = row[col_start_0:col_end_0]
+            row_data = [str(c) if c is not None else '' for c in sliced]
+            data.append(self._trim_preview_row(row_data))
+        return data
+
     def read_sheet_preview(self, filepath: str, sheet_name: str,
                            max_rows: int = 20, max_cols: int = 50,
                            start_row: int = 1, start_col: int = 1) -> List[List[str]]:
         """
-        读取单个 sheet 指定窗口的数据。
-        用于预览面板展示。
+        读取单个 sheet 指定窗口的数据。优先使用 calamine。
         """
         if self._is_xls_format(filepath):
             return self._read_sheet_preview_xls(filepath, sheet_name, max_rows, max_cols, start_row, start_col)
+
+        if HAS_CALAMINE:
+            try:
+                return self._read_sheet_preview_calamine(
+                    filepath, sheet_name, max_rows, max_cols, start_row, start_col
+                )
+            except Exception as e:
+                print(f"calamine 读取预览失败，回退到 openpyxl: {e}")
 
         try:
             wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -254,78 +334,189 @@ class XlsxScanner:
             print(f"警告: 读取 .xls 预览数据失败 {filepath}: {e}")
             return []
 
-    def find_sheet_matches(self, filepath: str, sheet_name: str, keyword: str,
-                           match_mode: str = 'fuzzy', max_hits: int = 200) -> List[Dict]:
-        """返回单个 sheet 中命中的单元格坐标和内容。"""
-        if not keyword:
-            return []
+    # ---- 合并的 read_sheet_with_hits：一次打开文件，返回命中和预览数据 ----
 
+    def read_sheet_with_hits(self, filepath: str, sheet_name: str,
+                              keyword: str = None, match_mode: str = 'fuzzy',
+                              max_hits: int = 200, preview_rows: int = 20,
+                              preview_cols: int = 50,
+                              start_row: int = None, start_col: int = None) -> tuple:
+        """
+        打开文件一次，同时完成命中查找和预览数据读取。
+        返回 (hits, preview_data, header_row)。
+
+        - hits: 命中的单元格坐标列表（与 find_sheet_matches 返回一致）
+        - preview_data: 预览行数据
+        - header_row: 第一行（Excel row 1），用作表头
+
+        若提供 start_row/start_col，直接使用该窗口起点；
+        否则若有关键字命中，围绕首个命中居中；否则从 row 2 开始。
+        """
         if self._is_xls_format(filepath):
-            return self._find_sheet_matches_xls(filepath, sheet_name, keyword, match_mode, max_hits)
+            return self._read_sheet_with_hits_xls(
+                filepath, sheet_name, keyword, match_mode, max_hits,
+                preview_rows, preview_cols, start_row, start_col
+            )
 
-        try:
-            wb = load_workbook(filepath, read_only=True, data_only=True)
-            if sheet_name not in wb.sheetnames:
-                wb.close()
-                return []
+        if HAS_CALAMINE:
+            try:
+                return self._read_sheet_with_hits_calamine(
+                    filepath, sheet_name, keyword, match_mode, max_hits,
+                    preview_rows, preview_cols, start_row, start_col
+                )
+            except Exception as e:
+                print(f"calamine 读取失败，回退到 openpyxl: {e}")
 
-            ws = wb[sheet_name]
-            matches = []
-            for row in ws.iter_rows():
-                for cell in row:
-                    if cell.value is None:
-                        continue
+        return self._read_sheet_with_hits_openpyxl(
+            filepath, sheet_name, keyword, match_mode, max_hits,
+            preview_rows, preview_cols, start_row, start_col
+        )
 
-                    value = str(cell.value)
-                    if self._cell_matches(value, keyword, match_mode):
-                        matches.append({
-                            'row': cell.row,
-                            'col': cell.column,
-                            'value': value,
-                        })
-                        if len(matches) >= max_hits:
-                            wb.close()
-                            return matches
+    def _read_sheet_with_hits_calamine(self, filepath: str, sheet_name: str,
+                                        keyword: str, match_mode: str,
+                                        max_hits: int, preview_rows: int,
+                                        preview_cols: int,
+                                        start_row: int, start_col: int) -> tuple:
+        """calamine 版本：一次加载全表，在内存中完成命中查找和预览截取"""
+        wb = CalamineWorkbook.from_path(filepath)
+        if sheet_name not in wb.sheet_names:
+            return [], [], []
 
+        sheet = wb.get_sheet_by_name(sheet_name)
+
+        # 一次性拉取所有行（calamine Rust 解析 → Python 对象）
+        all_rows = []
+        for row in sheet.iter_rows():
+            str_row = [str(c) if c is not None else '' for c in row]
+            all_rows.append(str_row)
+
+        return self._process_rows_in_memory(
+            all_rows, keyword, match_mode, max_hits,
+            preview_rows, preview_cols, start_row, start_col
+        )
+
+    def _read_sheet_with_hits_openpyxl(self, filepath: str, sheet_name: str,
+                                        keyword: str, match_mode: str,
+                                        max_hits: int, preview_rows: int,
+                                        preview_cols: int,
+                                        start_row: int, start_col: int) -> tuple:
+        """openpyxl 版本：回退实现"""
+        wb = load_workbook(filepath, read_only=True, data_only=True)
+        if sheet_name not in wb.sheetnames:
             wb.close()
-            return matches
-        except Exception as e:
-            print(f"警告: 查找命中单元格失败 {filepath}: {e}")
-            return []
+            return [], [], []
 
-    def _find_sheet_matches_xls(self, filepath: str, sheet_name: str, keyword: str,
-                                match_mode: str = 'fuzzy', max_hits: int = 200) -> List[Dict]:
-        """xlrd 版本：返回 .xls 文件命中的单元格坐标和内容。"""
+        ws = wb[sheet_name]
+        all_rows = []
+        for row in ws.iter_rows():
+            str_row = [str(cell.value) if cell.value is not None else '' for cell in row]
+            all_rows.append(str_row)
+        wb.close()
+
+        return self._process_rows_in_memory(
+            all_rows, keyword, match_mode, max_hits, preview_rows, preview_cols
+        )
+
+    def _process_rows_in_memory(self, all_rows: list, keyword: str, match_mode: str,
+                                 max_hits: int, preview_rows: int,
+                                 preview_cols: int,
+                                 start_row: int = None, start_col: int = None) -> tuple:
+        """在已加载的行数据中查找命中和截取预览，文件无关的纯数据操作。"""
+        if not all_rows:
+            return [], [], []
+
+        # 表头 = 第一行
+        header_row = all_rows[0][:preview_cols]
+        header_row = self._trim_preview_row(header_row)
+
+        # 查找命中
+        hits = []
+        first_hit = None
+        if keyword:
+            for row_idx, row in enumerate(all_rows):
+                if len(hits) >= max_hits:
+                    break
+                for col_idx, val in enumerate(row):
+                    if val and self._cell_matches(val, keyword, match_mode):
+                        hits.append({
+                            'row': row_idx + 1,
+                            'col': col_idx + 1,
+                            'value': val,
+                        })
+                        if first_hit is None:
+                            first_hit = (row_idx + 1, col_idx + 1)
+                        if len(hits) >= max_hits:
+                            break
+
+        # 确定预览窗口起点
+        if start_row is not None:
+            # 调用方显式指定起点
+            preview_start_row = max(start_row, 1)
+            preview_start_col = max(start_col or 1, 1)
+        elif first_hit:
+            # 围绕首个命中居中
+            preview_start_row = max(first_hit[0] - 3, 1)
+            preview_start_col = max(first_hit[1] - 2, 1)
+        else:
+            # 默认从 row 2 开始（跳过表头）
+            preview_start_row = 2
+            preview_start_col = 1
+
+        # 从已加载的行中截取预览数据
+        preview_data = []
+        row_start_0 = max(preview_start_row - 1, 0)
+        row_end_0 = min(len(all_rows), row_start_0 + preview_rows)
+        col_start_0 = max(preview_start_col - 1, 0)
+        col_end_0 = col_start_0 + preview_cols
+
+        for row_idx in range(row_start_0, row_end_0):
+            row = all_rows[row_idx]
+            sliced = row[col_start_0:col_end_0]
+            preview_data.append(self._trim_preview_row(sliced))
+
+        return hits, preview_data, header_row
+
+    def _read_sheet_with_hits_xls(self, filepath: str, sheet_name: str,
+                                   keyword: str, match_mode: str,
+                                   max_hits: int, preview_rows: int,
+                                   preview_cols: int,
+                                   start_row: int, start_col: int) -> tuple:
+        """xlrd 版本：合并命中查找和预览读取"""
         try:
             wb = xlrd.open_workbook(filepath, on_demand=True)
             if sheet_name not in wb.sheet_names():
                 wb.release_resources()
-                return []
+                return [], [], []
 
             ws = wb.sheet_by_name(sheet_name)
-            matches = []
+            all_rows = []
             for row_idx in range(ws.nrows):
+                str_row = []
                 for col_idx in range(ws.ncols):
                     val = ws.cell_value(row_idx, col_idx)
-                    if val is None or val == '':
-                        continue
-
-                    value = str(val)
-                    if self._cell_matches(value, keyword, match_mode):
-                        matches.append({
-                            'row': row_idx + 1,
-                            'col': col_idx + 1,
-                            'value': value,
-                        })
-                        if len(matches) >= max_hits:
-                            wb.release_resources()
-                            return matches
-
+                    str_row.append(str(val) if val is not None and val != '' else '')
+                all_rows.append(str_row)
             wb.release_resources()
-            return matches
+
+            return self._process_rows_in_memory(
+                all_rows, keyword, match_mode, max_hits,
+                preview_rows, preview_cols, start_row, start_col
+            )
         except Exception as e:
-            print(f"警告: 查找 .xls 命中单元格失败 {filepath}: {e}")
+            print(f"警告: 读取 .xls 命中/预览失败 {filepath}: {e}")
+            return [], [], []
+
+    def find_sheet_matches(self, filepath: str, sheet_name: str, keyword: str,
+                           match_mode: str = 'fuzzy', max_hits: int = 200) -> List[Dict]:
+        """返回单个 sheet 中命中的单元格坐标和内容（保留向后兼容）。"""
+        if not keyword:
             return []
+
+        hits, _, _ = self.read_sheet_with_hits(
+            filepath, sheet_name, keyword=keyword, match_mode=match_mode,
+            max_hits=max_hits, preview_rows=0, preview_cols=0
+        )
+        return hits
 
     def scan_directory_incremental(self, directory: str, index_manager, progress_callback: Callable = None) -> Tuple[int, int, int]:
         """
