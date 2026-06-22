@@ -415,7 +415,8 @@ class XlsxScanner:
         wb.close()
 
         return self._process_rows_in_memory(
-            all_rows, keyword, match_mode, max_hits, preview_rows, preview_cols
+            all_rows, keyword, match_mode, max_hits, preview_rows, preview_cols,
+            start_row, start_col
         )
 
     def _process_rows_in_memory(self, all_rows: list, keyword: str, match_mode: str,

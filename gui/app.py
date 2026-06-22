@@ -80,6 +80,7 @@ class DeepIndexWorker(QThread):
     finished = pyqtSignal(int, int, float)
     error = pyqtSignal(str)
     progress = pyqtSignal(int, int)
+    DEFAULT_MAX_PROCESSES = 4
 
     def __init__(self, index_manager, scanner):
         super().__init__()
@@ -87,10 +88,23 @@ class DeepIndexWorker(QThread):
         self.scanner = scanner
         self.warning_summary = ""
 
+    def _deep_index_process_count(self, file_count):
+        cpu_count = os.cpu_count() or 2
+        default_count = min(self.DEFAULT_MAX_PROCESSES, max(1, cpu_count - 1), file_count)
+        configured = os.environ.get("XLSXSEARCHER_DEEP_INDEX_PROCESSES")
+        if not configured:
+            return default_count
+        try:
+            return max(1, min(int(configured), file_count))
+        except ValueError:
+            logging.warning("Invalid XLSXSEARCHER_DEEP_INDEX_PROCESSES=%s", configured)
+            return default_count
+
     def run(self):
         import time
         from collections import defaultdict
         from multiprocessing import Pipe, get_context
+        from multiprocessing.connection import wait
         from core.deep_index_worker import extract_file_cell_texts
 
         start = time.time()
@@ -109,12 +123,19 @@ class DeepIndexWorker(QThread):
 
             errors = []
             ctx = get_context("spawn")
-            for filepath, entries in by_file.items():
-                count = len(entries)
+            max_workers = self._deep_index_process_count(len(by_file))
+            logging.info("Deep indexing process count: %s", max_workers)
+            pending_files = iter(by_file.items())
+            active = {}
+
+            def start_next_file():
+                try:
+                    filepath, entries = next(pending_files)
+                except StopIteration:
+                    return False
+
                 sheet_names = [e['sheet_name'] for e in entries]
                 sheet_ids = [e['sheet_id'] for e in entries]
-                logging.info("Deep indexing subprocess started: %s (%s sheets)", filepath, count)
-
                 parent_conn, child_conn = Pipe(duplex=False)
                 process = ctx.Process(
                     target=extract_file_cell_texts,
@@ -123,20 +144,28 @@ class DeepIndexWorker(QThread):
                 try:
                     process.start()
                     child_conn.close()
+                except BaseException:
+                    child_conn.close()
+                    parent_conn.close()
+                    raise
 
-                    if parent_conn.poll(timeout_seconds):
-                        result = parent_conn.recv()
-                    else:
-                        process.terminate()
-                        process.join(5)
-                        if process.is_alive():
-                            process.kill()
-                            process.join(5)
-                        result = {
-                            "ok": False,
-                            "error": f"Timed out after {timeout_seconds} seconds",
-                        }
+                active[parent_conn] = {
+                    "process": process,
+                    "filepath": filepath,
+                    "sheet_ids": sheet_ids,
+                    "count": len(entries),
+                    "started_at": time.time(),
+                }
+                logging.info("Deep indexing subprocess started: %s (%s sheets)", filepath, len(entries))
+                return True
 
+            def finish_job(parent_conn, result):
+                nonlocal processed
+                job = active.pop(parent_conn)
+                process = job["process"]
+                filepath = job["filepath"]
+                count = job["count"]
+                try:
                     process.join(5)
                     if process.is_alive():
                         process.terminate()
@@ -150,7 +179,10 @@ class DeepIndexWorker(QThread):
 
                     if result.get("ok"):
                         texts = result.get("texts") or []
-                        updates = [(text, sheet_id) for sheet_id, text in zip(sheet_ids, texts)]
+                        updates = [
+                            (text, sheet_id)
+                            for sheet_id, text in zip(job["sheet_ids"], texts)
+                        ]
                         if updates:
                             self.index_manager.update_sheet_cell_texts_batch(updates)
                         logging.info("Deep indexing subprocess finished: %s", filepath)
@@ -163,12 +195,6 @@ class DeepIndexWorker(QThread):
                             result.get("traceback", ""),
                         )
                         errors.append(f"{os.path.basename(filepath)}: {error_text}")
-                except BaseException as e:
-                    logging.exception("Deep indexing subprocess orchestration failed: %s", filepath)
-                    errors.append(f"{os.path.basename(filepath)}: {type(e).__name__}: {e}")
-                    if process.is_alive():
-                        process.terminate()
-                        process.join(5)
                 finally:
                     parent_conn.close()
                     if process.is_alive():
@@ -176,6 +202,58 @@ class DeepIndexWorker(QThread):
                         process.join(5)
                     processed += count
                     self.progress.emit(processed, total)
+
+            try:
+                for _ in range(max_workers):
+                    start_next_file()
+
+                while active:
+                    now = time.time()
+                    timed_out = [
+                        conn for conn, job in active.items()
+                        if now - job["started_at"] >= timeout_seconds
+                    ]
+                    for conn in timed_out:
+                        job = active[conn]
+                        process = job["process"]
+                        process.terminate()
+                        process.join(5)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(5)
+                        finish_job(conn, {
+                            "ok": False,
+                            "error": f"Timed out after {timeout_seconds} seconds",
+                        })
+                        start_next_file()
+
+                    if not active:
+                        break
+
+                    ready = wait(list(active.keys()), timeout=0.5)
+                    for conn in ready:
+                        try:
+                            result = conn.recv()
+                        except EOFError:
+                            result = {
+                                "ok": False,
+                                "error": "Child process exited without returning a result",
+                            }
+                        finish_job(conn, result)
+                        start_next_file()
+            except BaseException:
+                for conn, job in list(active.items()):
+                    process = job["process"]
+                    try:
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(5)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(5)
+                    finally:
+                        conn.close()
+                raise
 
             if errors:
                 summary = f"{len(errors)} files failed during deep indexing.\n" + "\n".join(errors[:5])
