@@ -9,6 +9,7 @@ Run from the repo root:
 """
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -242,8 +243,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ctx = get_context("spawn")
-    temp_dir = tempfile.TemporaryDirectory(prefix="xlsxsearcher_deep_index_bench_")
-    root = Path(temp_dir.name)
+    root = Path(tempfile.mkdtemp(prefix="xlsxsearcher_deep_index_bench_"))
     try:
         print(
             "Generating dataset: "
@@ -274,10 +274,9 @@ def main() -> None:
 
         if args.keep_data:
             print(f"dataset: {root}")
-            temp_dir = None
     finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
+        if not args.keep_data:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

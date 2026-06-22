@@ -12,6 +12,7 @@ Run from the repo root:
 """
 import argparse
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -156,8 +157,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    temp_dir = tempfile.TemporaryDirectory(prefix="xlsxsearcher_scan_bench_")
-    root = Path(temp_dir.name)
+    root = Path(tempfile.mkdtemp(prefix="xlsxsearcher_scan_bench_"))
     data_dir = root / "data"
     data_dir.mkdir()
     db_path = root / "scan_benchmark.db"
@@ -180,10 +180,9 @@ def main() -> None:
         if args.keep_data:
             print(f"\ndataset: {data_dir}")
             print(f"database: {db_path}")
-            temp_dir = None
     finally:
-        if temp_dir is not None:
-            temp_dir.cleanup()
+        if not args.keep_data:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":
