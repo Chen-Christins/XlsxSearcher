@@ -467,6 +467,15 @@ class XlsxScanner:
         need_buffer = bool(keyword and start_row is None)
         buffer = deque(maxlen=max(preview_rows + LEAD, 1))  # (excel_row, row)
 
+        # 有关键字但无显式起点时，额外收集默认窗口（row 2 起）作为 fallback：
+        # 若整张表无命中，回退到展示前 preview_rows 行，保持旧行为，避免空预览。
+        collect_fallback = bool(keyword and start_row is None)
+        fallback_preview = []
+        fallback_start_row = 2
+        fallback_end_row = fallback_start_row + preview_rows - 1
+        fallback_col_start_0 = 0
+        fallback_col_end_0 = preview_cols
+
         for row_idx, row in enumerate(row_iter):
             excel_row = row_idx + 1
 
@@ -507,6 +516,13 @@ class XlsxScanner:
                     sliced = row[window_col_start_0:window_col_end_0]
                     preview_data.append(self._trim_preview_row(sliced))
 
+            # 默认窗口 fallback 收集：命中确定后即停（不再需要）
+            if (collect_fallback and not window_determined_by_hit
+                    and fallback_start_row <= excel_row <= fallback_end_row):
+                fallback_preview.append(
+                    self._trim_preview_row(row[fallback_col_start_0:fallback_col_end_0])
+                )
+
             # 维护滚动缓冲（窗口尚未由命中确定时）
             if need_buffer and not window_determined_by_hit:
                 buffer.append((excel_row, row))
@@ -517,6 +533,10 @@ class XlsxScanner:
                     and excel_row > window_end_row
                     and len(preview_data) >= preview_rows):
                 break
+
+        # 有关键字但整张表无命中：回退到默认窗口（row 2 起），避免返回空预览
+        if not preview_data and collect_fallback:
+            preview_data = fallback_preview
 
         return hits, preview_data, header_row
 

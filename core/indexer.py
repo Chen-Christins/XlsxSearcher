@@ -20,6 +20,8 @@ class IndexManager:
         # 每个线程持有一个长连接（WAL 允许多读 + 单写并发），避免每次操作都
         # connect/close 的开销。ThreadPoolExecutor 复用线程，连接数有界。
         self._tls = threading.local()
+        # FTS5 是否可用，由 _init_fts 探测；不可用时降级到 LIKE，避免初始化失败
+        self._fts_available = False
         self._init_db()
 
     # ---- 连接管理 ----
@@ -88,46 +90,65 @@ class IndexManager:
         if 'cell_text' not in columns:
             cursor.execute('ALTER TABLE sheets ADD COLUMN cell_text TEXT')
 
-        self._init_fts(cursor)
+        self._fts_available = self._init_fts(cursor)
 
         conn.commit()
 
-    def _init_fts(self, cursor):
+    def _init_fts(self, cursor) -> bool:
         """创建 FTS5 trigram 全文索引（外部内容表，挂在 sheets.cell_text 上）。
 
         trigram 分词器支持子串匹配，等价于 LIKE '%kw%'，但能走倒排索引，
         在 cell_text 较大 / sheet 较多时比全表 LIKE 快数个数量级。
         通过触发器与 sheets 表保持同步，upsert / deep-index 无需额外改动。
+
+        返回 True 表示 FTS 可用；若当前 SQLite 未编入 FTS5 或不支持 trigram
+        分词器，捕获异常并清理可能残留的半成品后返回 False，调用方据此降级到
+        LIKE 搜索——避免 IndexManager() 初始化抛错导致 GUI 起不来。
         """
-        cursor.execute('''
-            CREATE VIRTUAL TABLE IF NOT EXISTS sheets_fts USING fts5(
-                cell_text, content='sheets', content_rowid='id', tokenize='trigram'
-            )
-        ''')
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS sheets_fts_ai AFTER INSERT ON sheets BEGIN
-                INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
-            END
-        ''')
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS sheets_fts_ad AFTER DELETE ON sheets BEGIN
-                INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
-                VALUES('delete', old.id, old.cell_text);
-            END
-        ''')
-        cursor.execute('''
-            CREATE TRIGGER IF NOT EXISTS sheets_fts_au AFTER UPDATE ON sheets BEGIN
-                INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
-                VALUES('delete', old.id, old.cell_text);
-                INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
-            END
-        ''')
-        # 回填：仅对尚未进入 FTS 的行建索引（幂等，可重复执行）。
-        cursor.execute('''
-            INSERT INTO sheets_fts(rowid, cell_text)
-            SELECT id, cell_text FROM sheets
-            WHERE id NOT IN (SELECT rowid FROM sheets_fts)
-        ''')
+        try:
+            cursor.execute('''
+                CREATE VIRTUAL TABLE IF NOT EXISTS sheets_fts USING fts5(
+                    cell_text, content='sheets', content_rowid='id', tokenize='trigram'
+                )
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS sheets_fts_ai AFTER INSERT ON sheets BEGIN
+                    INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
+                END
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS sheets_fts_ad AFTER DELETE ON sheets BEGIN
+                    INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
+                    VALUES('delete', old.id, old.cell_text);
+                END
+            ''')
+            cursor.execute('''
+                CREATE TRIGGER IF NOT EXISTS sheets_fts_au AFTER UPDATE ON sheets BEGIN
+                    INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
+                    VALUES('delete', old.id, old.cell_text);
+                    INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
+                END
+            ''')
+            # 回填：仅对尚未进入 FTS 的行建索引（幂等，可重复执行）。
+            cursor.execute('''
+                INSERT INTO sheets_fts(rowid, cell_text)
+                SELECT id, cell_text FROM sheets
+                WHERE id NOT IN (SELECT rowid FROM sheets_fts)
+            ''')
+            return True
+        except sqlite3.OperationalError as e:
+            # FTS5 / trigram 不可用：清理可能残留的 FTS 表与触发器，降级到 LIKE。
+            print(f"警告: FTS5 trigram 不可用，单元格搜索降级为 LIKE: {e}")
+            for trig in ('sheets_fts_ai', 'sheets_fts_ad', 'sheets_fts_au'):
+                try:
+                    cursor.execute(f'DROP TRIGGER IF EXISTS {trig}')
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                cursor.execute('DROP TABLE IF EXISTS sheets_fts')
+            except sqlite3.OperationalError:
+                pass
+            return False
 
     def get_file_info(self, filepath: str) -> Tuple:
         """获取文件信息"""
@@ -351,13 +372,14 @@ class IndexManager:
     def _build_cell_condition(self, keyword: str, match_mode: str) -> Tuple[str, List[str]]:
         """构造 cell_text 命中条件。
 
-        - 关键字 >= 3 字符：走 FTS5 trigram（子串匹配，等价 LIKE '%kw%' 但走倒排索引）。
-          prefix/exact 在 FTS 缩小候选集后再用原 LIKE 收紧，保持语义不变。
-        - 关键字 < 3 字符：trigram 无法高效命中，回退到全表 LIKE（行为与旧版一致）。
+        - 关键字 >= 3 字符且 FTS 可用：走 FTS5 trigram（子串匹配，等价 LIKE '%kw%'
+          但走倒排索引）。prefix/exact 在 FTS 缩小候选集后再用原 LIKE 收紧，保持语义不变。
+        - 关键字 < 3 字符，或 FTS 不可用（SQLite 未编入 FTS5/trigram）：
+          回退到全表 LIKE（行为与旧版一致）。
         返回 (SQL 片段, params)。
         """
         normalized_mode = match_mode or 'fuzzy'
-        if len(keyword) >= _FTS_MIN_TOKEN_LEN:
+        if len(keyword) >= _FTS_MIN_TOKEN_LEN and self._fts_available:
             fts_subquery = (
                 'SELECT rowid FROM sheets_fts WHERE sheets_fts MATCH ?'
             )
