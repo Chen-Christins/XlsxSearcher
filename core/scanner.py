@@ -23,9 +23,10 @@ NS = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 _SHEET_NAME_RE = re.compile(rb'<sheet\s[^>]*?name="([^"]*)"')
 
 class XlsxScanner:
-    def __init__(self, max_workers: int = 8):
+    def __init__(self, max_workers: int = 8, use_calamine: bool = True):
         self.supported_extensions = ['.xlsx', '.xlsm', '.xls']
         self.max_workers = max_workers
+        self.use_calamine = use_calamine
 
     @staticmethod
     def _trim_preview_row(row_data: List[str]) -> List[str]:
@@ -115,7 +116,7 @@ class XlsxScanner:
             return []
 
     def extract_cell_texts(self, filepath: str, sheet_names: List[str],
-                           max_chars_per_sheet: int = 50000) -> List[str]:
+                           max_chars_per_sheet: int = 20000) -> List[str]:
         """
         提取每个 sheet 的单元格内容（拼接为字符串），用于索引。
         优先使用 calamine（Rust 级解析速度），回退到 openpyxl。
@@ -129,11 +130,11 @@ class XlsxScanner:
             file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
         except OSError:
             file_size_mb = 0
-        if file_size_mb > 200:
+        if file_size_mb > 80:
             print(f"警告: 跳过超大文件 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)，避免内存溢出")
             return [''] * len(sheet_names)
 
-        if HAS_CALAMINE:
+        if self.use_calamine and HAS_CALAMINE:
             try:
                 return self._extract_cell_texts_calamine(
                     filepath, sheet_names, max_chars_per_sheet, file_size_mb
@@ -278,12 +279,12 @@ class XlsxScanner:
         if self._is_xls_format(filepath):
             return self._read_sheet_preview_xls(filepath, sheet_name, max_rows, max_cols, start_row, start_col)
 
-        if HAS_CALAMINE:
+        if self.use_calamine and HAS_CALAMINE:
             try:
                 return self._read_sheet_preview_calamine(
                     filepath, sheet_name, max_rows, max_cols, start_row, start_col
                 )
-            except Exception as e:
+            except BaseException as e:
                 print(f"calamine 读取预览失败，回退到 openpyxl: {e}")
 
         try:
@@ -358,13 +359,13 @@ class XlsxScanner:
                 preview_rows, preview_cols, start_row, start_col
             )
 
-        if HAS_CALAMINE:
+        if self.use_calamine and HAS_CALAMINE:
             try:
                 return self._read_sheet_with_hits_calamine(
                     filepath, sheet_name, keyword, match_mode, max_hits,
                     preview_rows, preview_cols, start_row, start_col
                 )
-            except Exception as e:
+            except BaseException as e:
                 print(f"calamine 读取失败，回退到 openpyxl: {e}")
 
         return self._read_sheet_with_hits_openpyxl(

@@ -1,6 +1,7 @@
 """XlsxSearcher 主界面 - PyQt5 版本"""
 import csv
 import json
+import logging
 import os
 import sys
 from PyQt5.QtWidgets import (
@@ -17,6 +18,15 @@ from core.alias_parser import parse_sheet_alias_file
 from core.scanner import XlsxScanner
 from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
+
+LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "XlsxSearcher")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_PATH = os.path.join(LOG_DIR, "app.log")
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+)
 
 
 def _msgbox(parent, level, title, text, buttons=QMessageBox.Ok, default_button=None):
@@ -75,12 +85,17 @@ class DeepIndexWorker(QThread):
         super().__init__()
         self.index_manager = index_manager
         self.scanner = scanner
+        self.warning_summary = ""
 
     def run(self):
         import time
         from collections import defaultdict
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from multiprocessing import Pipe, get_context
+        from core.deep_index_worker import extract_file_cell_texts
+
         start = time.time()
+        processed = 0
+        timeout_seconds = 180
         try:
             pending = self.index_manager.get_sheets_without_cell_text()
             total = len(pending)
@@ -88,54 +103,91 @@ class DeepIndexWorker(QThread):
                 self.finished.emit(0, 0, 0.0)
                 return
 
-            # 按文件分组
             by_file = defaultdict(list)
             for entry in pending:
                 by_file[entry['filepath']].append(entry)
 
-            # 并行处理：2 线程并发（openpyxl 内存占用高，太高并发容易 OOM）
-            max_workers = min(2, len(by_file))
-            processed = 0
+            errors = []
+            ctx = get_context("spawn")
+            for filepath, entries in by_file.items():
+                count = len(entries)
+                sheet_names = [e['sheet_name'] for e in entries]
+                sheet_ids = [e['sheet_id'] for e in entries]
+                logging.info("Deep indexing subprocess started: %s (%s sheets)", filepath, count)
 
-            # 每个线程用自己的 scanner 实例（避免 openpyxl 线程竞争）
-            from core.scanner import XlsxScanner as ScannerCls
+                parent_conn, child_conn = Pipe(duplex=False)
+                process = ctx.Process(
+                    target=extract_file_cell_texts,
+                    args=(filepath, sheet_names, child_conn, False),
+                )
+                try:
+                    process.start()
+                    child_conn.close()
 
-            def _extract(fp, names, ids):
-                s = ScannerCls()
-                texts = s.extract_cell_texts(fp, names)
-                return [(text, sid) for sid, text in zip(ids, texts)]
+                    if parent_conn.poll(timeout_seconds):
+                        result = parent_conn.recv()
+                    else:
+                        process.terminate()
+                        process.join(5)
+                        if process.is_alive():
+                            process.kill()
+                            process.join(5)
+                        result = {
+                            "ok": False,
+                            "error": f"Timed out after {timeout_seconds} seconds",
+                        }
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for filepath, entries in by_file.items():
-                    sheet_names = [e['sheet_name'] for e in entries]
-                    sheet_ids = [e['sheet_id'] for e in entries]
-                    future = executor.submit(_extract, filepath, sheet_names, sheet_ids)
-                    futures[future] = (filepath, len(entries))
+                    process.join(5)
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(5)
 
-                errors = []
-                for future in as_completed(futures):
-                    filepath, count = futures[future]
-                    try:
-                        updates = future.result()
+                    if process.exitcode not in (0, None) and result.get("ok"):
+                        result = {
+                            "ok": False,
+                            "error": f"Child process exited with code {process.exitcode}",
+                        }
+
+                    if result.get("ok"):
+                        texts = result.get("texts") or []
+                        updates = [(text, sheet_id) for sheet_id, text in zip(sheet_ids, texts)]
                         if updates:
                             self.index_manager.update_sheet_cell_texts_batch(updates)
-                    except Exception as e:
-                        print(f"警告: 深度索引文件失败 {filepath}: {e}")
-                        errors.append(f"{os.path.basename(filepath)}: {e}")
+                        logging.info("Deep indexing subprocess finished: %s", filepath)
+                    else:
+                        error_text = result.get("error", "unknown child process error")
+                        logging.error(
+                            "Deep indexing subprocess failed: %s: %s\n%s",
+                            filepath,
+                            error_text,
+                            result.get("traceback", ""),
+                        )
+                        errors.append(f"{os.path.basename(filepath)}: {error_text}")
+                except BaseException as e:
+                    logging.exception("Deep indexing subprocess orchestration failed: %s", filepath)
+                    errors.append(f"{os.path.basename(filepath)}: {type(e).__name__}: {e}")
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(5)
+                finally:
+                    parent_conn.close()
+                    if process.is_alive():
+                        process.kill()
+                        process.join(5)
                     processed += count
                     self.progress.emit(processed, total)
 
-                if errors:
-                    summary = f"{len(errors)} 个文件深度索引失败:\n" + "\n".join(errors[:5])
-                    if len(errors) > 5:
-                        summary += f"\n...及其他 {len(errors) - 5} 个"
-                    self.error.emit(summary)
+            if errors:
+                summary = f"{len(errors)} files failed during deep indexing.\n" + "\n".join(errors[:5])
+                if len(errors) > 5:
+                    summary += f"\n...and {len(errors) - 5} more."
+                self.warning_summary = summary
+                logging.warning(summary)
 
             self.finished.emit(processed, total, time.time() - start)
-        except Exception as e:
+        except BaseException as e:
+            logging.exception("Deep indexing worker failed")
             self.error.emit(str(e))
-
 
 class SearchWorker(QThread):
     """搜索工作线程 — 在后台执行 SQLite 查询和结果分组，避免阻塞 UI"""
@@ -181,7 +233,7 @@ class XlsxSearcherApp(QMainWindow):
 
         # 核心组件
         self.index_manager = IndexManager()
-        self.scanner = XlsxScanner()
+        self.scanner = XlsxScanner(use_calamine=False)
         self.searcher = Searcher(self.index_manager)
         self.settings = QSettings('XlsxSearcher', 'XlsxSearcher')
 
@@ -550,6 +602,12 @@ class XlsxSearcherApp(QMainWindow):
             f"{status['pending_deep_index_count']} 待补全"
         )
 
+    def _restore_action_buttons(self):
+        has_selection = self.result_tree.currentItem() is not None
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
+            btn.setEnabled(has_selection)
+        self.btn_export.setEnabled(bool(self.search_results))
+
     def _reset_preview_state(self):
         """清空当前预览和命中定位状态。"""
         self.preview_state = {
@@ -802,6 +860,7 @@ class XlsxSearcherApp(QMainWindow):
         """扫描完成回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
+        self._restore_action_buttons()
 
         # 格式化耗时
         if duration >= 60:
@@ -820,6 +879,7 @@ class XlsxSearcherApp(QMainWindow):
         """扫描/深度索引错误回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
+        self._restore_action_buttons()
         self._refresh_index_status_label()
         self.status_bar.showMessage("操作出错")
         _msgbox(self, 'error', '错误', f'操作失败: {error_msg}')
@@ -846,6 +906,7 @@ class XlsxSearcherApp(QMainWindow):
         """深度索引完成回调"""
         self.is_scanning = False
         self.scan_progress.setVisible(False)
+        self._restore_action_buttons()
 
         # 格式化耗时（与扫描一致，通过 _pending_status_prefix 传递到最终状态栏）
         if duration >= 60:
@@ -861,6 +922,10 @@ class XlsxSearcherApp(QMainWindow):
             self._pending_status_prefix = (
                 f"深度索引完成：已处理 {processed}/{total} 个子表，耗时 {time_str}"
             )
+            warning_summary = getattr(self.deep_worker, 'warning_summary', '')
+            if warning_summary:
+                first_line = warning_summary.splitlines()[0]
+                self._pending_status_prefix += f"；{first_line}，详见日志"
         self._refresh_index_status_label()
         self._do_search()
 
