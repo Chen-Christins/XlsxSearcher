@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-06-22
+
+## What's Changed
+
+### Added
+- 新增 `benchmarks/deep_index_benchmark.py`，用于对比深度索引串行子进程与有限并发子进程的耗时、处理 sheet 数、提取字符数和加速比。
+- 新增 `benchmarks/scan_benchmark.py`，按阶段统计普通目录扫描耗时，包括目录遍历、索引快照查询、变更文件筛选、sheet 名提取和 SQLite 批量写入。
+- 新增/完善 `benchmarks/README.md`，说明各 benchmark 脚本用途、运行方式、常用参数和 `--keep-data` 调试用法。
+
+### Improved
+- 深度索引从逐文件串行子进程改为有限并发子进程调度，默认最多 4 个子进程，并受 CPU 数和待处理文件数限制。
+- 新增 `XLSXSEARCHER_DEEP_INDEX_PROCESSES` 环境变量，可按机器性能或磁盘情况覆盖深度索引并发数。
+- 深度索引调度保留单文件超时和异常隔离，SQLite 写入仍在父线程串行执行，避免并发写库风险。
+
+### Fixed
+- 修复 benchmark 脚本 `--keep-data` 参数不会真正保留临时数据的问题；默认运行仍会自动清理临时文件。
+
 ### Added
 - **FTS5 全文索引**：`sheets.cell_text` 新增 trigram 分词的 FTS5 倒排索引（外部内容表 + 触发器自动同步）。单元格内容搜索从 `LIKE '%kw%'` 全表扫描改为倒排索引命中，深度索引后搜索提速数倍；`prefix`/`exact` 模式在 FTS 缩小候选集后再用 LIKE 收紧，短关键字（<3 字符）自动回退 LIKE，行为与旧版一致
 - **预览异步加载**：新增 `PreviewWorker`，预览读取（命中查找 + 窗口数据 + 表头）移至后台线程。选中大表不再阻塞 UI；多个请求通过 token 取舍，旧结果不会回写
