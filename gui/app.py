@@ -225,6 +225,48 @@ class SearchWorker(QThread):
                 self.error.emit(str(e))
 
 
+class PreviewWorker(QThread):
+    """预览读取工作线程 — 在后台打开文件、流式提取命中与预览窗口，避免阻塞 UI。
+
+    选中大表时旧实现会在主线程同步读取整张表，导致界面冻结数秒；
+    这里把 read_sheet_with_hits 移到后台线程，UI 线程只负责渲染。
+    支持协作式取消：被新请求取代后，旧结果不会回写 UI（通过 token 判定）。
+    """
+    finished = pyqtSignal(list, list, list)  # hits, preview_data, header_row
+    error = pyqtSignal(str)
+
+    def __init__(self, scanner, filepath, sheet_name, keyword, match_mode,
+                 start_row, start_col):
+        super().__init__()
+        self.scanner = scanner
+        self.filepath = filepath
+        self.sheet_name = sheet_name
+        self.keyword = keyword
+        self.match_mode = match_mode
+        self.start_row = start_row
+        self.start_col = start_col
+        self._cancelled = False
+        # 由调用方设置，用于在回写时判断是否仍是最新请求
+        self.token = 0
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            result = self.scanner.read_sheet_with_hits(
+                self.filepath, self.sheet_name,
+                keyword=self.keyword, match_mode=self.match_mode,
+                start_row=self.start_row, start_col=self.start_col,
+            )
+            if not self._cancelled:
+                hits, preview_data, header_row = result
+                self.finished.emit(hits, preview_data, header_row)
+        except Exception as e:
+            if not self._cancelled:
+                self.error.emit(str(e))
+
+
 class XlsxSearcherApp(QMainWindow):
     MAX_SEARCH_HISTORY = 15
 
@@ -243,6 +285,8 @@ class XlsxSearcherApp(QMainWindow):
         self.search_history = []
         self.is_scanning = False
         self.search_worker = None
+        self.preview_worker = None
+        self._preview_token = 0
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
         self._pending_status_prefix = ''
@@ -1098,36 +1142,17 @@ class XlsxSearcherApp(QMainWindow):
             search_keyword = self.preview_search_entry.text().strip() or self.cell_entry.text().strip()
             match_mode = self.match_mode_combo.currentData()
 
-            # 一次文件打开：命中查找 + 预览数据 + 表头
-            hits, preview_data, header_row = self.scanner.read_sheet_with_hits(
-                filepath, sheet_name,
-                keyword=search_keyword or None,
-                match_mode=match_mode,
-            )
-
-            current_hit_index = 0 if hits else -1
-            if hits:
-                start_row, start_col = self._compute_preview_start(hits[0])
-            else:
-                start_row, start_col = 2, 1
-
-            self.preview_state.update({
-                'filepath': filepath,
-                'sheet_name': sheet_name,
-                'start_row': start_row,
-                'start_col': start_col,
-                'hits': hits,
-                'current_hit_index': current_hit_index,
-                'active_keyword': search_keyword,
-            })
-
             self.preview_search_entry.blockSignals(True)
             self.preview_search_entry.setText(search_keyword)
             self.preview_search_entry.blockSignals(False)
-            self._update_preview_controls()
-            data_start_row = start_row if start_row > 1 else 2
-            self._render_preview_table(filepath, sheet_name, preview_data, header_row,
-                                       data_start_row, start_col)
+
+            # 异步加载预览（命中查找 + 预览数据 + 表头在后台线程完成）
+            self._request_preview(
+                filepath, sheet_name,
+                keyword=search_keyword or None,
+                match_mode=match_mode,
+                navigation=False,
+            )
             return
 
         self._reset_preview_state()
@@ -1187,32 +1212,100 @@ class XlsxSearcherApp(QMainWindow):
 
         self.status_bar.showMessage("就绪")
 
-    def _update_preview(self, filepath, sheet_name, start_row=1, start_col=1):
-        """加载预览面板：读取 sheet 数据并渲染。用于命中跳转等已有 hits 的场景。"""
-        if not filepath or not os.path.exists(filepath):
+    def _request_preview(self, filepath, sheet_name, *, keyword=None,
+                          match_mode='fuzzy', start_row=None, start_col=None,
+                          navigation=False):
+        """异步加载预览。navigation=True 表示仅刷新窗口、保留现有命中列表。"""
+        if not filepath or not sheet_name:
+            return
+        if not os.path.exists(filepath):
             self._clear_preview(message="预览: 文件不存在或已被移动")
             return
 
-        data_start_row = start_row if start_row > 1 else 2
-        self.status_bar.showMessage("正在加载预览...")
-        QApplication.processEvents()
-        try:
-            _, preview_data, header_row = self.scanner.read_sheet_with_hits(
-                filepath, sheet_name,
-                keyword=None,
-                start_row=data_start_row,
-                start_col=start_col,
-            )
-        except Exception as e:
-            self._clear_preview(message=f"预览: 读取失败 - {e}")
-            self.status_bar.showMessage("预览加载失败")
-            return
+        # 取消上一个未完成的预览请求（结果仍会返回，但被 token 判定为过期而丢弃）
+        if self.preview_worker is not None:
+            self.preview_worker.cancel()
 
-        self._render_preview_table(filepath, sheet_name, preview_data, header_row,
+        self._preview_token += 1
+        token = self._preview_token
+        self.status_bar.showMessage("正在加载预览...")
+
+        worker = PreviewWorker(
+            self.scanner, filepath, sheet_name, keyword, match_mode,
+            start_row, start_col
+        )
+        worker.token = token
+        request = {
+            'filepath': filepath,
+            'sheet_name': sheet_name,
+            'keyword': keyword,
+            'start_row': start_row,
+            'start_col': start_col,
+            'navigation': navigation,
+        }
+        worker.finished.connect(
+            lambda hits, data, header: self._on_preview_ready(token, request, hits, data, header, worker)
+        )
+        worker.error.connect(
+            lambda msg: self._on_preview_error(token, msg, worker)
+        )
+        self.preview_worker = worker
+        worker.start()
+
+    def _on_preview_ready(self, token, request, hits, data, header_row, worker):
+        """后台预览读取完成，在 UI 线程更新状态并渲染。"""
+        if worker is self.preview_worker:
+            self.preview_worker = None
+        worker.deleteLater()
+        if token != self._preview_token:
+            return  # 已被更新的请求取代
+
+        filepath = request['filepath']
+        sheet_name = request['sheet_name']
+
+        if request['navigation']:
+            # 仅刷新窗口，保留现有命中与当前命中索引
+            start_row = request['start_row']
+            start_col = request['start_col']
+        else:
+            current_hit_index = 0 if hits else -1
+            if hits:
+                start_row, start_col = self._compute_preview_start(hits[0])
+            else:
+                start_row, start_col = 2, 1
+            self.preview_state.update({
+                'filepath': filepath,
+                'sheet_name': sheet_name,
+                'hits': hits,
+                'current_hit_index': current_hit_index,
+                'active_keyword': request['keyword'],
+            })
+
+        data_start_row = start_row if start_row > 1 else 2
+        self._render_preview_table(filepath, sheet_name, data, header_row,
                                    data_start_row, start_col)
 
+    def _on_preview_error(self, token, msg, worker):
+        if worker is self.preview_worker:
+            self.preview_worker = None
+        worker.deleteLater()
+        if token != self._preview_token:
+            return
+        self._clear_preview(message=f"预览: 读取失败 - {msg}")
+        self.status_bar.showMessage("预览加载失败")
+
+    def _update_preview(self, filepath, sheet_name, start_row=1, start_col=1):
+        """加载预览面板（异步）。用于命中跳转等已有 hits 的场景，保留命中列表。"""
+        self._request_preview(
+            filepath, sheet_name,
+            keyword=None,
+            start_row=start_row,
+            start_col=start_col,
+            navigation=True,
+        )
+
     def _search_within_preview(self):
-        """在当前预览的 sheet 内重新搜索并跳到首个命中。"""
+        """在当前预览的 sheet 内重新搜索并跳到首个命中（异步）。"""
         filepath = self.preview_state.get('filepath')
         sheet_name = self.preview_state.get('sheet_name')
         if not filepath or not sheet_name:
@@ -1221,29 +1314,12 @@ class XlsxSearcherApp(QMainWindow):
         keyword = self.preview_search_entry.text().strip()
         match_mode = self.match_mode_combo.currentData()
 
-        # 一次文件打开：命中查找 + 预览数据 + 表头
-        hits, preview_data, header_row = self.scanner.read_sheet_with_hits(
+        self._request_preview(
             filepath, sheet_name,
             keyword=keyword or None,
             match_mode=match_mode,
+            navigation=False,
         )
-
-        current_hit_index = 0 if hits else -1
-        if hits:
-            start_row, start_col = self._compute_preview_start(hits[0])
-        else:
-            start_row, start_col = 2, 1
-
-        self.preview_state.update({
-            'hits': hits,
-            'current_hit_index': current_hit_index,
-            'active_keyword': keyword,
-            'start_row': start_row,
-            'start_col': start_col,
-        })
-        data_start_row = start_row if start_row > 1 else 2
-        self._render_preview_table(filepath, sheet_name, preview_data, header_row,
-                                   data_start_row, start_col)
 
     def _goto_prev_preview_hit(self):
         """跳到上一个命中。"""

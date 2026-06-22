@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **FTS5 全文索引**：`sheets.cell_text` 新增 trigram 分词的 FTS5 倒排索引（外部内容表 + 触发器自动同步）。单元格内容搜索从 `LIKE '%kw%'` 全表扫描改为倒排索引命中，深度索引后搜索提速数倍；`prefix`/`exact` 模式在 FTS 缩小候选集后再用 LIKE 收紧，短关键字（<3 字符）自动回退 LIKE，行为与旧版一致
+- **预览异步加载**：新增 `PreviewWorker`，预览读取（命中查找 + 窗口数据 + 表头）移至后台线程。选中大表不再阻塞 UI；多个请求通过 token 取舍，旧结果不会回写
+- **性能对比测试**：新增 `benchmarks/bench.py`，覆盖三项优化的正确性断言与耗时/内存对比
+
+### Improved
+- **预览读取流式化**：`read_sheet_with_hits` 由"整表载入内存再切片"改为单遍流式，只保留有界滚动窗口（约 `preview_rows` 行）+ 有界命中列表。大表预览峰值内存从 ~42MB 降至接近 0，耗时下降约 7-8x
+- **SQLite 连接复用**：`IndexManager` 改为每线程长连接（`threading.local`），不再每次操作 connect/close；配合已有的 WAL 模式降低反复建连开销
+- **upsert 跳过未变 sheets**：重新扫描时若某文件的 sheet 名列表与索引完全一致，仅更新 mtime，跳过 sheets 的 DELETE+INSERT 重建，避免搬运已深度索引的 `cell_text`（二次扫描耗时大幅下降）
+- 移除冗余索引 `idx_filepath`（`filepath` 已有 UNIQUE 约束自带索引）
+
 ## [1.4.1] - 2026-06-20
 
 ## What's Changed

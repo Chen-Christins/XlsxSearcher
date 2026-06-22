@@ -343,7 +343,7 @@ class XlsxScanner:
                               preview_cols: int = 50,
                               start_row: int = None, start_col: int = None) -> tuple:
         """
-        打开文件一次，同时完成命中查找和预览数据读取。
+        打开文件一次，单遍流式完成命中查找和预览数据读取。
         返回 (hits, preview_data, header_row)。
 
         - hits: 命中的单元格坐标列表（与 find_sheet_matches 返回一致）
@@ -352,6 +352,10 @@ class XlsxScanner:
 
         若提供 start_row/start_col，直接使用该窗口起点；
         否则若有关键字命中，围绕首个命中居中；否则从 row 2 开始。
+
+        相比旧实现（一次性把整张表载入内存再切片），这里只保留一个大小约
+        preview_rows 的滚动窗口 + 有界的命中列表，大表上显著降低内存峰值；
+        同时为后台线程预览读取做好了无状态准备。
         """
         if self._is_xls_format(filepath):
             return self._read_sheet_with_hits_xls(
@@ -378,21 +382,19 @@ class XlsxScanner:
                                         max_hits: int, preview_rows: int,
                                         preview_cols: int,
                                         start_row: int, start_col: int) -> tuple:
-        """calamine 版本：一次加载全表，在内存中完成命中查找和预览截取"""
+        """calamine 版本：流式迭代行，单遍完成命中查找和预览截取"""
         wb = CalamineWorkbook.from_path(filepath)
         if sheet_name not in wb.sheet_names:
             return [], [], []
 
         sheet = wb.get_sheet_by_name(sheet_name)
 
-        # 一次性拉取所有行（calamine Rust 解析 → Python 对象）
-        all_rows = []
-        for row in sheet.iter_rows():
-            str_row = [str(c) if c is not None else '' for c in row]
-            all_rows.append(str_row)
+        def row_iter():
+            for row in sheet.iter_rows():
+                yield [str(c) if c is not None else '' for c in row]
 
-        return self._process_rows_in_memory(
-            all_rows, keyword, match_mode, max_hits,
+        return self._stream_hits_and_preview(
+            row_iter(), keyword, match_mode, max_hits,
             preview_rows, preview_cols, start_row, start_col
         )
 
@@ -401,79 +403,140 @@ class XlsxScanner:
                                         max_hits: int, preview_rows: int,
                                         preview_cols: int,
                                         start_row: int, start_col: int) -> tuple:
-        """openpyxl 版本：回退实现"""
+        """openpyxl 版本：read_only 模式下 iter_rows 本身懒加载，流式收益最大"""
         wb = load_workbook(filepath, read_only=True, data_only=True)
-        if sheet_name not in wb.sheetnames:
+        try:
+            if sheet_name not in wb.sheetnames:
+                return [], [], []
+
+            ws = wb[sheet_name]
+
+            def row_iter():
+                for row in ws.iter_rows():
+                    yield [str(cell.value) if cell.value is not None else '' for cell in row]
+
+            return self._stream_hits_and_preview(
+                row_iter(), keyword, match_mode, max_hits,
+                preview_rows, preview_cols, start_row, start_col
+            )
+        finally:
             wb.close()
-            return [], [], []
 
-        ws = wb[sheet_name]
-        all_rows = []
-        for row in ws.iter_rows():
-            str_row = [str(cell.value) if cell.value is not None else '' for cell in row]
-            all_rows.append(str_row)
-        wb.close()
+    def _stream_hits_and_preview(self, row_iter, keyword: str, match_mode: str,
+                                  max_hits: int, preview_rows: int,
+                                  preview_cols: int,
+                                  start_row: int = None, start_col: int = None) -> tuple:
+        """单遍流式：在行迭代器上同时收集命中和预览窗口，文件无关的纯数据操作。
 
-        return self._process_rows_in_memory(
-            all_rows, keyword, match_mode, max_hits, preview_rows, preview_cols
-        )
+        内存有界：
+        - hits 列表上限 max_hits；
+        - preview_data 上限 preview_rows；
+        - 当窗口由首个命中决定时，用一个 maxlen=preview_rows+LEAD 的滚动缓冲
+          保留命中行上方的若干行，命中确定后落盘到 preview_data，之后只追加
+          窗口内剩余行。
+        """
+        from collections import deque
 
-    def _process_rows_in_memory(self, all_rows: list, keyword: str, match_mode: str,
-                                 max_hits: int, preview_rows: int,
-                                 preview_cols: int,
-                                 start_row: int = None, start_col: int = None) -> tuple:
-        """在已加载的行数据中查找命中和截取预览，文件无关的纯数据操作。"""
-        if not all_rows:
-            return [], [], []
+        LEAD = 3  # 命中行上方展示的行数
 
-        # 表头 = 第一行
-        header_row = all_rows[0][:preview_cols]
-        header_row = self._trim_preview_row(header_row)
+        # 无关键字且未显式指定起点：默认从 row 2 开始（跳过表头）
+        if not keyword and start_row is None:
+            start_row = 2
+            start_col = 1
 
-        # 查找命中
+        header_row = []
         hits = []
         first_hit = None
-        if keyword:
-            for row_idx, row in enumerate(all_rows):
-                if len(hits) >= max_hits:
-                    break
+        preview_data = []
+
+        # 预览窗口（1-based Excel 行 / 0-based 列切片）
+        window_start_row = None
+        window_end_row = None
+        window_col_start_0 = None
+        window_col_end_0 = None
+        window_determined_by_hit = False
+
+        if start_row is not None:
+            window_start_row = max(start_row, 1)
+            window_end_row = window_start_row + preview_rows - 1
+            cs = max(start_col or 1, 1)
+            window_col_start_0 = cs - 1
+            window_col_end_0 = window_col_start_0 + preview_cols
+
+        # 仅在“有关键字且窗口待命中决定”时需要保留上方滚动缓冲
+        need_buffer = bool(keyword and start_row is None)
+        buffer = deque(maxlen=max(preview_rows + LEAD, 1))  # (excel_row, row)
+
+        # 有关键字但无显式起点时，额外收集默认窗口（row 2 起）作为 fallback：
+        # 若整张表无命中，回退到展示前 preview_rows 行，保持旧行为，避免空预览。
+        collect_fallback = bool(keyword and start_row is None)
+        fallback_preview = []
+        fallback_start_row = 2
+        fallback_end_row = fallback_start_row + preview_rows - 1
+        fallback_col_start_0 = 0
+        fallback_col_end_0 = preview_cols
+
+        for row_idx, row in enumerate(row_iter):
+            excel_row = row_idx + 1
+
+            if row_idx == 0:
+                header_row = self._trim_preview_row(row[:preview_cols])
+
+            # 命中查找
+            if keyword and len(hits) < max_hits:
                 for col_idx, val in enumerate(row):
                     if val and self._cell_matches(val, keyword, match_mode):
                         hits.append({
-                            'row': row_idx + 1,
+                            'row': excel_row,
                             'col': col_idx + 1,
                             'value': val,
                         })
                         if first_hit is None:
-                            first_hit = (row_idx + 1, col_idx + 1)
+                            first_hit = (excel_row, col_idx + 1)
+                            if start_row is None:
+                                # 围绕首个命中确定窗口
+                                window_determined_by_hit = True
+                                window_start_row = max(excel_row - LEAD, 1)
+                                window_end_row = window_start_row + preview_rows - 1
+                                window_col_start_0 = max(col_idx + 1 - 2, 1) - 1
+                                window_col_end_0 = window_col_start_0 + preview_cols
+                                # 缓冲里落在窗口内的行（严格小于当前行）落盘
+                                for b_excel, b_row in buffer:
+                                    if window_start_row <= b_excel <= window_end_row:
+                                        sliced = b_row[window_col_start_0:window_col_end_0]
+                                        preview_data.append(self._trim_preview_row(sliced))
                         if len(hits) >= max_hits:
                             break
 
-        # 确定预览窗口起点
-        if start_row is not None:
-            # 调用方显式指定起点
-            preview_start_row = max(start_row, 1)
-            preview_start_col = max(start_col or 1, 1)
-        elif first_hit:
-            # 围绕首个命中居中
-            preview_start_row = max(first_hit[0] - 3, 1)
-            preview_start_col = max(first_hit[1] - 2, 1)
-        else:
-            # 默认从 row 2 开始（跳过表头）
-            preview_start_row = 2
-            preview_start_col = 1
+            # 预览窗口捕获
+            if (window_start_row is not None
+                    and window_start_row <= excel_row <= window_end_row):
+                # 命中决定窗口时，缓冲行(< 当前行)已落盘，这里只处理当前及之后的行
+                if not window_determined_by_hit or excel_row >= first_hit[0]:
+                    sliced = row[window_col_start_0:window_col_end_0]
+                    preview_data.append(self._trim_preview_row(sliced))
 
-        # 从已加载的行中截取预览数据
-        preview_data = []
-        row_start_0 = max(preview_start_row - 1, 0)
-        row_end_0 = min(len(all_rows), row_start_0 + preview_rows)
-        col_start_0 = max(preview_start_col - 1, 0)
-        col_end_0 = col_start_0 + preview_cols
+            # 默认窗口 fallback 收集：命中确定后即停（不再需要）
+            if (collect_fallback and not window_determined_by_hit
+                    and fallback_start_row <= excel_row <= fallback_end_row):
+                fallback_preview.append(
+                    self._trim_preview_row(row[fallback_col_start_0:fallback_col_end_0])
+                )
 
-        for row_idx in range(row_start_0, row_end_0):
-            row = all_rows[row_idx]
-            sliced = row[col_start_0:col_end_0]
-            preview_data.append(self._trim_preview_row(sliced))
+            # 维护滚动缓冲（窗口尚未由命中确定时）
+            if need_buffer and not window_determined_by_hit:
+                buffer.append((excel_row, row))
+
+            # 收集完成可提前结束
+            if (len(hits) >= max_hits
+                    and window_end_row is not None
+                    and excel_row > window_end_row
+                    and len(preview_data) >= preview_rows):
+                break
+
+        # 有关键字但整张表无命中：回退到默认窗口（row 2 起），避免返回空预览
+        if not preview_data and collect_fallback:
+            preview_data = fallback_preview
 
         return hits, preview_data, header_row
 
@@ -482,7 +545,7 @@ class XlsxScanner:
                                    max_hits: int, preview_rows: int,
                                    preview_cols: int,
                                    start_row: int, start_col: int) -> tuple:
-        """xlrd 版本：合并命中查找和预览读取"""
+        """xlrd 版本：合并命中查找和预览读取（流式）"""
         try:
             wb = xlrd.open_workbook(filepath, on_demand=True)
             if sheet_name not in wb.sheet_names():
@@ -490,19 +553,21 @@ class XlsxScanner:
                 return [], [], []
 
             ws = wb.sheet_by_name(sheet_name)
-            all_rows = []
-            for row_idx in range(ws.nrows):
-                str_row = []
-                for col_idx in range(ws.ncols):
-                    val = ws.cell_value(row_idx, col_idx)
-                    str_row.append(str(val) if val is not None and val != '' else '')
-                all_rows.append(str_row)
-            wb.release_resources()
 
-            return self._process_rows_in_memory(
-                all_rows, keyword, match_mode, max_hits,
-                preview_rows, preview_cols, start_row, start_col
-            )
+            def row_iter():
+                for row_idx in range(ws.nrows):
+                    yield [
+                        str(ws.cell_value(row_idx, c)) if ws.cell_value(row_idx, c) not in (None, '') else ''
+                        for c in range(ws.ncols)
+                    ]
+
+            try:
+                return self._stream_hits_and_preview(
+                    row_iter(), keyword, match_mode, max_hits,
+                    preview_rows, preview_cols, start_row, start_col
+                )
+            finally:
+                wb.release_resources()
         except Exception as e:
             print(f"警告: 读取 .xls 命中/预览失败 {filepath}: {e}")
             return [], [], []
