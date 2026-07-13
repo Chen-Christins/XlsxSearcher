@@ -32,7 +32,8 @@ class Searcher:
         sheet_keyword: str = None,
         filename_keyword: str = None,
         cell_keyword: str = None,
-        match_mode: str = 'fuzzy'
+        match_mode: str = 'fuzzy',
+        sort_mode: str = 'filename_asc',
     ) -> List[Dict]:
         """
         搜索xlsx文件
@@ -40,6 +41,7 @@ class Searcher:
         @param filename_keyword: 文件名关键字
         @param cell_keyword: 单元格内容关键字
         @param match_mode: 匹配模式 exact / prefix / fuzzy
+        @param sort_mode: 排序方式
         @return: 搜索结果列表
         """
         if not sheet_keyword and not filename_keyword and not cell_keyword:
@@ -49,7 +51,8 @@ class Searcher:
             self._resolve_sheet_keywords(sheet_keyword, match_mode),
             filename_keyword,
             cell_keyword,
-            match_mode
+            match_mode,
+            sort_mode,
         )
 
     def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:

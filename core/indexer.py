@@ -95,15 +95,17 @@ class IndexManager:
         conn.commit()
 
     def _init_fts(self, cursor) -> bool:
-        """创建 FTS5 trigram 全文索引（外部内容表，挂在 sheets.cell_text 上）。
+        """创建 FTS5 trigram 全文索引（外部内容表，挂在 sheets 上）。
 
-        trigram 分词器支持子串匹配，等价于 LIKE '%kw%'，但能走倒排索引，
-        在 cell_text 较大 / sheet 较多时比全表 LIKE 快数个数量级。
-        通过触发器与 sheets 表保持同步，upsert / deep-index 无需额外改动。
+        同时创建两个 FTS 表：
+        - sheets_fts：sheets.cell_text（单元格内容）
+        - sheets_fts_names：sheets.sheet_name（子表名称）
 
-        返回 True 表示 FTS 可用；若当前 SQLite 未编入 FTS5 或不支持 trigram
-        分词器，捕获异常并清理可能残留的半成品后返回 False，调用方据此降级到
-        LIKE 搜索——避免 IndexManager() 初始化抛错导致 GUI 起不来。
+        trigram 分词器支持子串匹配，速度比 LIKE 快数个数量级。
+        通过触发器与 sheets 表保持同步。
+
+        返回 True 表示可用；若 SQLite 未编入 FTS5/trigram，清理残留后返回 False，
+        调用方降级到 LIKE。
         """
         try:
             cursor.execute('''
@@ -112,42 +114,49 @@ class IndexManager:
                 )
             ''')
             cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS sheets_fts_ai AFTER INSERT ON sheets BEGIN
-                    INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
-                END
+                CREATE VIRTUAL TABLE IF NOT EXISTS sheets_fts_names USING fts5(
+                    sheet_name, content='sheets', content_rowid='id', tokenize='trigram'
+                )
             ''')
-            cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS sheets_fts_ad AFTER DELETE ON sheets BEGIN
-                    INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
-                    VALUES('delete', old.id, old.cell_text);
-                END
-            ''')
-            cursor.execute('''
-                CREATE TRIGGER IF NOT EXISTS sheets_fts_au AFTER UPDATE ON sheets BEGIN
-                    INSERT INTO sheets_fts(sheets_fts, rowid, cell_text)
-                    VALUES('delete', old.id, old.cell_text);
-                    INSERT INTO sheets_fts(rowid, cell_text) VALUES (new.id, new.cell_text);
-                END
-            ''')
-            # 回填：仅对尚未进入 FTS 的行建索引（幂等，可重复执行）。
-            cursor.execute('''
-                INSERT INTO sheets_fts(rowid, cell_text)
-                SELECT id, cell_text FROM sheets
-                WHERE id NOT IN (SELECT rowid FROM sheets_fts)
-            ''')
+            for suffix, col in (('', 'cell_text'), ('_names', 'sheet_name')):
+                cursor.execute(f'''
+                    CREATE TRIGGER IF NOT EXISTS sheets_fts{suffix}_ai AFTER INSERT ON sheets BEGIN
+                        INSERT INTO sheets_fts{suffix}(rowid, {col}) VALUES (new.id, new.{col});
+                    END
+                ''')
+                cursor.execute(f'''
+                    CREATE TRIGGER IF NOT EXISTS sheets_fts{suffix}_ad AFTER DELETE ON sheets BEGIN
+                        INSERT INTO sheets_fts{suffix}(sheets_fts{suffix}, rowid, {col})
+                        VALUES('delete', old.id, old.{col});
+                    END
+                ''')
+                cursor.execute(f'''
+                    CREATE TRIGGER IF NOT EXISTS sheets_fts{suffix}_au AFTER UPDATE ON sheets BEGIN
+                        INSERT INTO sheets_fts{suffix}(sheets_fts{suffix}, rowid, {col})
+                        VALUES('delete', old.id, old.{col});
+                        INSERT INTO sheets_fts{suffix}(rowid, {col}) VALUES (new.id, new.{col});
+                    END
+                ''')
+                # 回填（幂等，可重复执行）
+                cursor.execute(f'''
+                    INSERT INTO sheets_fts{suffix}(rowid, {col})
+                    SELECT id, {col} FROM sheets
+                    WHERE id NOT IN (SELECT rowid FROM sheets_fts{suffix})
+                ''')
             return True
         except sqlite3.OperationalError as e:
-            # FTS5 / trigram 不可用：清理可能残留的 FTS 表与触发器，降级到 LIKE。
-            print(f"警告: FTS5 trigram 不可用，单元格搜索降级为 LIKE: {e}")
-            for trig in ('sheets_fts_ai', 'sheets_fts_ad', 'sheets_fts_au'):
+            print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}")
+            for trig in ('sheets_fts_ai', 'sheets_fts_ad', 'sheets_fts_au',
+                         'sheets_fts_names_ai', 'sheets_fts_names_ad', 'sheets_fts_names_au'):
                 try:
                     cursor.execute(f'DROP TRIGGER IF EXISTS {trig}')
                 except sqlite3.OperationalError:
                     pass
-            try:
-                cursor.execute('DROP TABLE IF EXISTS sheets_fts')
-            except sqlite3.OperationalError:
-                pass
+            for tbl in ('sheets_fts', 'sheets_fts_names'):
+                try:
+                    cursor.execute(f'DROP TABLE IF EXISTS {tbl}')
+                except sqlite3.OperationalError:
+                    pass
             return False
 
     def get_file_info(self, filepath: str) -> Tuple:
@@ -397,6 +406,41 @@ class IndexManager:
         clause, value = self._build_match_clause('s.cell_text', keyword, normalized_mode)
         return clause, [value]
 
+    def _build_sheet_name_condition(self, keywords: List[str], match_mode: str) -> Tuple[str, List[str]]:
+        """构造 sheet_name 命中条件（支持多关键字 OR）。
+
+        当所有关键字 >= 3 字符且 FTS 可用时走 FTS5 trigram，否则回退到 LIKE。
+        prefix/exact 在 FTS 缩小候选集后再收紧，保持语义不变。
+        """
+        normalized_mode = match_mode or 'fuzzy'
+        all_long = all(len(kw) >= _FTS_MIN_TOKEN_LEN for kw in keywords)
+        if all_long and self._fts_available:
+            fts_terms = [self._fts_match_value(kw) for kw in keywords]
+            cond = f's.id IN (SELECT rowid FROM sheets_fts_names WHERE sheets_fts_names MATCH ?)'
+            params = [' OR '.join(fts_terms)]
+            if normalized_mode == 'prefix':
+                clauses = [f's.sheet_name LIKE ? COLLATE NOCASE' for _ in keywords]
+                cond += ' AND (' + ' OR '.join(clauses) + ')'
+                params.extend(f'{kw}%' for kw in keywords)
+            elif normalized_mode == 'exact':
+                clauses = [f'LOWER(s.sheet_name) = LOWER(?)' for _ in keywords]
+                cond += ' AND (' + ' OR '.join(clauses) + ')'
+                params.extend(keywords)
+            return cond, params
+        # 回退：短关键字或 FTS 不可用，走 LIKE
+        clauses = []
+        params = []
+        seen_lower = set()
+        for kw in keywords:
+            dedupe_key = kw.lower()
+            if dedupe_key in seen_lower:
+                continue
+            seen_lower.add(dedupe_key)
+            clause, val = self._build_match_clause('s.sheet_name', kw, normalized_mode)
+            clauses.append(clause)
+            params.append(val)
+        return '(' + ' OR '.join(clauses) + ')', params
+
     def replace_sheet_aliases(self, source_path: str, mappings: List[Tuple[str, str]]) -> int:
         """替换同一来源文件导入的子表别名映射。"""
         conn = self._conn()
@@ -465,7 +509,8 @@ class IndexManager:
         sheet_keywords: List[str] = None,
         filename_keyword: str = None,
         cell_keyword: str = None,
-        match_mode: str = 'fuzzy'
+        match_mode: str = 'fuzzy',
+        sort_mode: str = 'filename_asc',
     ) -> List[Dict]:
         conn = self._conn()
         cursor = conn.cursor()
@@ -484,21 +529,21 @@ class IndexManager:
             params.append(value)
 
         if sheet_keywords:
-            sheet_conditions = []
-            seen_keywords = set()
-            for sheet_keyword in sheet_keywords:
-                normalized_keyword = (sheet_keyword or '').strip()
-                if not normalized_keyword:
+            deduped = []
+            seen = set()
+            for kw in sheet_keywords:
+                normalized = (kw or '').strip()
+                if not normalized:
                     continue
-                dedupe_key = normalized_keyword.lower()
-                if dedupe_key in seen_keywords:
+                key = normalized.lower()
+                if key in seen:
                     continue
-                seen_keywords.add(dedupe_key)
-                clause, value = self._build_match_clause('s.sheet_name', normalized_keyword, match_mode)
-                sheet_conditions.append(clause)
-                params.append(value)
-            if sheet_conditions:
-                conditions.append('(' + ' OR '.join(sheet_conditions) + ')')
+                seen.add(key)
+                deduped.append(normalized)
+            if deduped:
+                cond, vals = self._build_sheet_name_condition(deduped, match_mode)
+                conditions.append(cond)
+                params.extend(vals)
 
         if cell_keyword:
             cell_cond, cell_params = self._build_cell_condition(cell_keyword, match_mode)
@@ -508,7 +553,9 @@ class IndexManager:
         if conditions:
             query.append('WHERE ' + ' AND '.join(conditions))
 
-        query.append('ORDER BY LOWER(f.filename), LOWER(s.sheet_name)')
+        if sort_mode in ('filename_asc', 'filename_desc'):
+            order = 'DESC' if sort_mode == 'filename_desc' else ''
+            query.append(f'ORDER BY LOWER(f.filename) {order}, LOWER(s.sheet_name) {order}')
         cursor.execute('\n'.join(query), tuple(params))
         rows = cursor.fetchall()
 
@@ -531,24 +578,25 @@ class IndexManager:
             result['sheet_names_display'] = ', '.join(result['sheet_names'])
         return results
 
-    def get_all_files_with_sheets(self) -> List[Dict]:
+    def get_all_files_with_sheets(self, sort_mode: str = 'filename_asc') -> List[Dict]:
         """获取所有已索引文件及其子表"""
-        return self._fetch_grouped_results()
+        return self._fetch_grouped_results(sort_mode=sort_mode)
 
-    def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
+    def search_by_sheet_name(self, keyword: str, match_mode: str = 'fuzzy', sort_mode: str = 'filename_asc') -> List[Dict]:
         """按子表名称搜索"""
-        return self._fetch_grouped_results(sheet_keywords=[keyword], match_mode=match_mode)
+        return self._fetch_grouped_results(sheet_keywords=[keyword], match_mode=match_mode, sort_mode=sort_mode)
 
-    def search_by_filename(self, keyword: str, match_mode: str = 'fuzzy') -> List[Dict]:
+    def search_by_filename(self, keyword: str, match_mode: str = 'fuzzy', sort_mode: str = 'filename_asc') -> List[Dict]:
         """按文件名搜索"""
-        return self._fetch_grouped_results(filename_keyword=keyword, match_mode=match_mode)
+        return self._fetch_grouped_results(filename_keyword=keyword, match_mode=match_mode, sort_mode=sort_mode)
 
     def search(
         self,
         sheet_keywords: List[str] = None,
         filename_keyword: str = None,
         cell_keyword: str = None,
-        match_mode: str = 'fuzzy'
+        match_mode: str = 'fuzzy',
+        sort_mode: str = 'filename_asc',
     ) -> List[Dict]:
         """综合搜索"""
         if not sheet_keywords and not filename_keyword and not cell_keyword:
@@ -557,7 +605,8 @@ class IndexManager:
             sheet_keywords=sheet_keywords,
             filename_keyword=filename_keyword,
             cell_keyword=cell_keyword,
-            match_mode=match_mode
+            match_mode=match_mode,
+            sort_mode=sort_mode,
         )
 
     def get_sheets_without_cell_text(self) -> List[Dict]:
