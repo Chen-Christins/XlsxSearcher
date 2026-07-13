@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-07-13
+
+## What's Changed
+
+### Added
+- **FTS5 子表名搜索**：`sheets.sheet_name` 新增 trigram 分词 FTS5 倒排索引（`sheets_fts_names`，外部内容表 + 触发器自动同步 + 幂等回填）。子表名搜索从全表 `LIKE` 扫描改为走倒排索引，在大索引上提速数倍；多关键字 OR 场景合并为一条 FTS MATCH；prefix/exact 模式在 FTS 缩小候选集后再收紧；短关键字（<3 字符）自动回退 LIKE，行为兼容
+
+### Improved
+- **Calamine 默认启用**：`XlsxScanner` 和深度索引子进程统一使用 `use_calamine=True`。1.4.2 为稳定深度索引一刀切关闭了 calamine，导致预览和索引退化为 openpyxl 慢路径（5-10x 性能损失）；现重新启用，所有 calamine 路径均有 `BaseException` 捕获自动回退 openpyxl，无破坏风险
+- **深度索引改用进程池**：`DeepIndexWorker` 从"每文件 spawn 一个子进程 + 手动 Pipe 调度"改为 `multiprocessing.Pool.imap_unordered` 复用固定数量子进程。消除 macOS spawn 上下文每文件约 50-100ms 的进程创建开销，代码量从 110 行精简至 40 行
+- **搜索排序下推 SQL**：`filename_asc`/`filename_desc` 模式的排序由 `_fetch_grouped_results` 的 SQL `ORDER BY` 直接完成，Python 端 `_sort_results` 跳过重排（消除冗余 O(n log n)）。`sort_mode` 参数贯穿 `Searcher` → `IndexManager` → `SearchWorker` 链路
+
 ## [1.4.2] - 2026-06-22
 
 ## What's Changed

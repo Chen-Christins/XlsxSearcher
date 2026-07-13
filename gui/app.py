@@ -103,13 +103,11 @@ class DeepIndexWorker(QThread):
     def run(self):
         import time
         from collections import defaultdict
-        from multiprocessing import Pipe, get_context
-        from multiprocessing.connection import wait
-        from core.deep_index_worker import extract_file_cell_texts
+        from multiprocessing import get_context
+        from core.deep_index_worker import extract_file_cell_texts_pool
 
         start = time.time()
         processed = 0
-        timeout_seconds = 180
         try:
             pending = self.index_manager.get_sheets_without_cell_text()
             total = len(pending)
@@ -124,136 +122,47 @@ class DeepIndexWorker(QThread):
             errors = []
             ctx = get_context("spawn")
             max_workers = self._deep_index_process_count(len(by_file))
-            logging.info("Deep indexing process count: %s", max_workers)
-            pending_files = iter(by_file.items())
-            active = {}
+            logging.info("Deep indexing pool workers: %s", max_workers)
 
-            def start_next_file():
-                try:
-                    filepath, entries = next(pending_files)
-                except StopIteration:
-                    return False
-
+            # Build pool args and metadata lookup
+            file_args = []
+            file_meta = {}
+            for filepath, entries in by_file.items():
                 sheet_names = [e['sheet_name'] for e in entries]
                 sheet_ids = [e['sheet_id'] for e in entries]
-                parent_conn, child_conn = Pipe(duplex=False)
-                process = ctx.Process(
-                    target=extract_file_cell_texts,
-                    args=(filepath, sheet_names, child_conn, False),
-                )
-                try:
-                    process.start()
-                    child_conn.close()
-                except BaseException:
-                    child_conn.close()
-                    parent_conn.close()
-                    raise
-
-                active[parent_conn] = {
-                    "process": process,
-                    "filepath": filepath,
-                    "sheet_ids": sheet_ids,
-                    "count": len(entries),
-                    "started_at": time.time(),
+                file_args.append((filepath, sheet_names, True))
+                file_meta[filepath] = {
+                    'sheet_ids': sheet_ids,
+                    'count': len(entries),
                 }
-                logging.info("Deep indexing subprocess started: %s (%s sheets)", filepath, len(entries))
-                return True
 
-            def finish_job(parent_conn, result):
-                nonlocal processed
-                job = active.pop(parent_conn)
-                process = job["process"]
-                filepath = job["filepath"]
-                count = job["count"]
-                try:
-                    process.join(5)
-                    if process.is_alive():
-                        process.terminate()
-                        process.join(5)
-
-                    if process.exitcode not in (0, None) and result.get("ok"):
-                        result = {
-                            "ok": False,
-                            "error": f"Child process exited with code {process.exitcode}",
-                        }
+            with ctx.Pool(max_workers) as pool:
+                for result in pool.imap_unordered(extract_file_cell_texts_pool, file_args):
+                    filepath = result['filepath']
+                    meta = file_meta[filepath]
+                    count = meta['count']
 
                     if result.get("ok"):
                         texts = result.get("texts") or []
                         updates = [
-                            (text, sheet_id)
-                            for sheet_id, text in zip(job["sheet_ids"], texts)
+                            (text, sid)
+                            for text, sid in zip(texts, meta['sheet_ids'])
                         ]
                         if updates:
                             self.index_manager.update_sheet_cell_texts_batch(updates)
-                        logging.info("Deep indexing subprocess finished: %s", filepath)
+                        logging.info("Deep indexing finished: %s", filepath)
                     else:
-                        error_text = result.get("error", "unknown child process error")
+                        error_text = result.get("error", "unknown error")
                         logging.error(
-                            "Deep indexing subprocess failed: %s: %s\n%s",
+                            "Deep indexing failed: %s: %s\n%s",
                             filepath,
                             error_text,
                             result.get("traceback", ""),
                         )
                         errors.append(f"{os.path.basename(filepath)}: {error_text}")
-                finally:
-                    parent_conn.close()
-                    if process.is_alive():
-                        process.kill()
-                        process.join(5)
+
                     processed += count
                     self.progress.emit(processed, total)
-
-            try:
-                for _ in range(max_workers):
-                    start_next_file()
-
-                while active:
-                    now = time.time()
-                    timed_out = [
-                        conn for conn, job in active.items()
-                        if now - job["started_at"] >= timeout_seconds
-                    ]
-                    for conn in timed_out:
-                        job = active[conn]
-                        process = job["process"]
-                        process.terminate()
-                        process.join(5)
-                        if process.is_alive():
-                            process.kill()
-                            process.join(5)
-                        finish_job(conn, {
-                            "ok": False,
-                            "error": f"Timed out after {timeout_seconds} seconds",
-                        })
-                        start_next_file()
-
-                    if not active:
-                        break
-
-                    ready = wait(list(active.keys()), timeout=0.5)
-                    for conn in ready:
-                        try:
-                            result = conn.recv()
-                        except EOFError:
-                            result = {
-                                "ok": False,
-                                "error": "Child process exited without returning a result",
-                            }
-                        finish_job(conn, result)
-                        start_next_file()
-            except BaseException:
-                for conn, job in list(active.items()):
-                    process = job["process"]
-                    try:
-                        if process.is_alive():
-                            process.terminate()
-                            process.join(5)
-                        if process.is_alive():
-                            process.kill()
-                            process.join(5)
-                    finally:
-                        conn.close()
-                raise
 
             if errors:
                 summary = f"{len(errors)} files failed during deep indexing.\n" + "\n".join(errors[:5])
@@ -273,7 +182,7 @@ class SearchWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, searcher, index_manager, sheet_keyword, filename_keyword,
-                 cell_keyword, match_mode):
+                 cell_keyword, match_mode, sort_mode='filename_asc'):
         super().__init__()
         self.searcher = searcher
         self.index_manager = index_manager
@@ -281,6 +190,7 @@ class SearchWorker(QThread):
         self.filename_keyword = filename_keyword
         self.cell_keyword = cell_keyword
         self.match_mode = match_mode
+        self.sort_mode = sort_mode
         self._cancelled = False
 
     def cancel(self):
@@ -290,11 +200,11 @@ class SearchWorker(QThread):
     def run(self):
         try:
             if not self.sheet_keyword and not self.filename_keyword and not self.cell_keyword:
-                results = self.index_manager.get_all_files_with_sheets()
+                results = self.index_manager.get_all_files_with_sheets(sort_mode=self.sort_mode)
             else:
                 results = self.searcher.search(
                     self.sheet_keyword, self.filename_keyword,
-                    self.cell_keyword, self.match_mode
+                    self.cell_keyword, self.match_mode, self.sort_mode
                 )
             if not self._cancelled:
                 self.finished.emit(results)
@@ -353,7 +263,7 @@ class XlsxSearcherApp(QMainWindow):
 
         # 核心组件
         self.index_manager = IndexManager()
-        self.scanner = XlsxScanner(use_calamine=False)
+        self.scanner = XlsxScanner(use_calamine=True)
         self.searcher = Searcher(self.index_manager)
         self.settings = QSettings('XlsxSearcher', 'XlsxSearcher')
 
@@ -1083,7 +993,8 @@ class XlsxSearcherApp(QMainWindow):
 
         self.search_worker = SearchWorker(
             self.searcher, self.index_manager,
-            sheet_keyword, filename_keyword, cell_keyword, match_mode
+            sheet_keyword, filename_keyword, cell_keyword, match_mode,
+            self.current_sort_mode
         )
         self.search_worker.finished.connect(self._on_search_finished)
         self.search_worker.error.connect(self._on_search_error)
@@ -1505,7 +1416,7 @@ class XlsxSearcherApp(QMainWindow):
         self._do_search()
 
     def _sort_results(self):
-        """按当前规则排序结果"""
+        """按当前规则排序结果（filename 模式已由 SQL 排序，跳过 Python 重排）"""
         sort_mode = self.current_sort_mode or 'filename_asc'
 
         if sort_mode.startswith('sheet_count'):
@@ -1514,13 +1425,6 @@ class XlsxSearcherApp(QMainWindow):
             )
             if sort_mode == 'sheet_count_desc':
                 self.search_results.reverse()
-            return
-
-        self.search_results.sort(
-            key=lambda item: (item['filename'].lower(), item['filepath'].lower())
-        )
-        if sort_mode == 'filename_desc':
-            self.search_results.reverse()
 
     def _update_status_summary(self, prefix: str = None):
         """更新结果统计"""
