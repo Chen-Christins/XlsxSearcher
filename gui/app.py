@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
     QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QAction
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QBrush, QColor, QIcon
@@ -18,6 +18,8 @@ from core.alias_parser import parse_sheet_alias_file
 from core.scanner import XlsxScanner
 from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
+
+VERSION = "1.4.3"
 
 LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "XlsxSearcher")
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -302,6 +304,8 @@ class XlsxSearcherApp(QMainWindow):
         self.setMinimumSize(1000, 700)
         self.resize(1000, 700)
 
+        self._init_menu_bar()
+
         # 搜索防抖定时器
         self.search_timer = QTimer()
         self.search_timer.setSingleShot(True)
@@ -536,6 +540,24 @@ class XlsxSearcherApp(QMainWindow):
         self.scan_progress.setVisible(False)
         bottom_layout.addSpacing(12)
         bottom_layout.addWidget(self.scan_progress)
+
+    def _init_menu_bar(self):
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("帮助")
+        about_action = QAction(f"关于 XlsxSearcher {VERSION}", self)
+        about_action.triggered.connect(self._show_about)
+        if sys.platform == 'darwin':
+            about_action.setMenuRole(QAction.AboutRole)
+        help_menu.addAction(about_action)
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "关于 XlsxSearcher",
+            f"<h3>XlsxSearcher v{VERSION}</h3>"
+            "<p>Excel 子表搜索工具</p>"
+            "<p>快速搜索 Excel 文件中的工作表名称和单元格内容。</p>"
+        )
 
     def _toggle_preview(self):
         """折叠/展开预览面板"""
