@@ -4,6 +4,9 @@ import json
 import logging
 import os
 import sys
+
+import yaml
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
@@ -19,11 +22,25 @@ from core.scanner import XlsxScanner
 from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
 
-VERSION = "1.4.3"
+if getattr(sys, 'frozen', False):
+    _APP_ROOT = sys._MEIPASS
+else:
+    _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "XlsxSearcher")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_PATH = os.path.join(LOG_DIR, "app.log")
+_CONFIG_PATH = os.path.join(_APP_ROOT, 'app.yml')
+try:
+    with open(_CONFIG_PATH, encoding='utf-8') as f:
+        _CONFIG = yaml.safe_load(f) or {}
+except Exception:
+    _CONFIG = {}
+
+_cfg_app = _CONFIG.get('app', {})
+VERSION = _cfg_app.get('version', '0.0.0')
+DATA_DIR = os.path.normpath(os.path.expanduser(_cfg_app.get('data_dir', '~/.local/XlsxSearcher')))
+ICON_REL = _cfg_app.get('icon', 'icons/app_icon.png')
+
+os.makedirs(DATA_DIR, exist_ok=True)
+LOG_PATH = os.path.join(DATA_DIR, "app.log")
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -264,7 +281,8 @@ class XlsxSearcherApp(QMainWindow):
         super().__init__()
 
         # 核心组件
-        self.index_manager = IndexManager()
+        db_path = os.path.join(DATA_DIR, 'index.db')
+        self.index_manager = IndexManager(db_path=db_path)
         self.scanner = XlsxScanner(use_calamine=True)
         self.searcher = Searcher(self.index_manager)
         self.settings = QSettings('XlsxSearcher', 'XlsxSearcher')
@@ -1612,12 +1630,7 @@ class XlsxSearcherApp(QMainWindow):
 
 
 def _get_icon_path():
-    """获取图标文件路径，兼容开发环境和 PyInstaller 打包后的路径"""
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, 'icons', 'app_icon.png')
+    return os.path.join(_APP_ROOT, ICON_REL)
 
 
 def _fix_macos_cfbundle_name():

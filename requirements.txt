@@ -4,3 +4,4 @@ PyQt5>=5.15.0
 Pillow>=9.0.0
 python-calamine>=0.3.0
 xlrd==1.2.0
+PyYAML>=6.0

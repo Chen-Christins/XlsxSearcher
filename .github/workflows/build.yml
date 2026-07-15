@@ -58,6 +58,7 @@ jobs:
           pyinstaller --onefile --windowed --name ${{ matrix.exe_name }} \
             --icon "$ICON_FILE" \
             --add-data "icons/app_icon.png${SEP}icons" \
+            --add-data "app.yml${SEP}." \
             main.py
 
       - name: Create artifact
