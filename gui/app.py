@@ -4,11 +4,14 @@ import json
 import logging
 import os
 import sys
+
+import yaml
+
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
     QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QAction
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QBrush, QColor, QIcon
@@ -19,9 +22,25 @@ from core.scanner import XlsxScanner
 from core.searcher import Searcher
 from utils.file_utils import open_file, open_in_explorer, copy_to_clipboard
 
-LOG_DIR = os.path.join(os.path.expanduser("~"), ".local", "XlsxSearcher")
-os.makedirs(LOG_DIR, exist_ok=True)
-LOG_PATH = os.path.join(LOG_DIR, "app.log")
+if getattr(sys, 'frozen', False):
+    _APP_ROOT = sys._MEIPASS
+else:
+    _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+_CONFIG_PATH = os.path.join(_APP_ROOT, 'app.yml')
+try:
+    with open(_CONFIG_PATH, encoding='utf-8') as f:
+        _CONFIG = yaml.safe_load(f) or {}
+except Exception:
+    _CONFIG = {}
+
+_cfg_app = _CONFIG.get('app', {})
+VERSION = _cfg_app.get('version', '0.0.0')
+DATA_DIR = os.path.normpath(os.path.expanduser(_cfg_app.get('data_dir', '~/.local/XlsxSearcher')))
+ICON_REL = _cfg_app.get('icon', 'icons/app_icon.png')
+
+os.makedirs(DATA_DIR, exist_ok=True)
+LOG_PATH = os.path.join(DATA_DIR, "app.log")
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -262,7 +281,8 @@ class XlsxSearcherApp(QMainWindow):
         super().__init__()
 
         # 核心组件
-        self.index_manager = IndexManager()
+        db_path = os.path.join(DATA_DIR, 'index.db')
+        self.index_manager = IndexManager(db_path=db_path)
         self.scanner = XlsxScanner(use_calamine=True)
         self.searcher = Searcher(self.index_manager)
         self.settings = QSettings('XlsxSearcher', 'XlsxSearcher')
@@ -301,6 +321,8 @@ class XlsxSearcherApp(QMainWindow):
         self.setWindowTitle("XlsxSearcher - Excel子表搜索工具")
         self.setMinimumSize(1000, 700)
         self.resize(1000, 700)
+
+        self._init_menu_bar()
 
         # 搜索防抖定时器
         self.search_timer = QTimer()
@@ -537,6 +559,26 @@ class XlsxSearcherApp(QMainWindow):
         bottom_layout.addSpacing(12)
         bottom_layout.addWidget(self.scan_progress)
 
+    def _init_menu_bar(self):
+        if sys.platform == 'darwin':
+            menubar = self.menuBar()
+            help_menu = menubar.addMenu("帮助")
+            about_action = QAction(f"关于 XlsxSearcher {VERSION}", self)
+            about_action.triggered.connect(self._show_about)
+            about_action.setMenuRole(QAction.AboutRole)
+            help_menu.addAction(about_action)
+
+
+
+    def _show_about(self):
+        QMessageBox.about(
+            self,
+            "关于 XlsxSearcher",
+            f"<h3>XlsxSearcher v{VERSION}</h3>"
+            "<p>Excel 子表搜索工具</p>"
+            "<p>快速搜索 Excel 文件中的工作表名称和单元格内容。</p>"
+        )
+
     def _toggle_preview(self):
         """折叠/展开预览面板"""
         if self.preview_visible:
@@ -554,12 +596,15 @@ class XlsxSearcherApp(QMainWindow):
             self.status_bar.showMessage("预览面板已展开", 2000)
 
     def keyPressEvent(self, event):
-        """捕获 Ctrl+` / Cmd+` 折叠/展开预览"""
+        """捕获快捷键"""
         key = event.key()
         mods = event.modifiers()
         is_ctrl = mods & Qt.CTRL
         is_cmd = mods & Qt.META
-        # backtick: QuoteLeft (0x60), also check AsciiTilde on some layouts
+        if key == Qt.Key_F1:
+            self._show_about()
+            return
+        # backtick: Ctrl+` / Cmd+` 折叠/展开预览
         if (is_ctrl or is_cmd) and key in (Qt.Key_QuoteLeft, Qt.Key_AsciiTilde):
             self._toggle_preview()
             return
@@ -1585,12 +1630,7 @@ class XlsxSearcherApp(QMainWindow):
 
 
 def _get_icon_path():
-    """获取图标文件路径，兼容开发环境和 PyInstaller 打包后的路径"""
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_path, 'icons', 'app_icon.png')
+    return os.path.join(_APP_ROOT, ICON_REL)
 
 
 def _fix_macos_cfbundle_name():

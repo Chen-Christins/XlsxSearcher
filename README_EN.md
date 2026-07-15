@@ -91,6 +91,7 @@ Other features:
 ```
 XlsxSearcher/
 ├── main.py              # Entry point
+├── app.yml              # App config (version, data dir, etc.)
 ├── requirements.txt     # Dependencies
 ├── icons/               # App icons
 ├── core/
@@ -111,6 +112,7 @@ XlsxSearcher/
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "app.yml:." \
   main.py
 ```
 
@@ -122,6 +124,7 @@ The generated `.app` is in the `dist` directory. Extract and double-click to run
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
+  --add-data "app.yml;." \
   main.py
 ```
 
@@ -133,16 +136,31 @@ The generated `.exe` is in the `dist` directory.
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "app.yml:." \
   main.py
 ```
 
 The generated executable is in the `dist` directory.
 
+## Configuration
+
+Application config `app.yml` is located at the project root. You can customize version, icon path, and data directory:
+
+```yaml
+# XlsxSearcher application configuration
+app:
+  name: XlsxSearcher
+  version: "1.4.3"          # App version, update here before release
+  icon: icons/app_icon.png   # Runtime window icon
+  data_dir: ~/.local/XlsxSearcher  # Database and log directory
+```
+
 ## Data Storage
 
-The index database and local preferences are stored in the user directory:
+Index database and logs are stored under the `data_dir` path configured in `app.yml`:
 
 - **Index Database**: `~/.local/XlsxSearcher/index.db`
+- **Application Log**: `~/.local/XlsxSearcher/app.log`
 - **Preferences**: Stored via `QSettings` (macOS: `~/Library/Preferences/`)
 
 ## License

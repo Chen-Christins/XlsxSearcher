@@ -91,6 +91,7 @@ python main.py
 ```
 XlsxSearcher/
 ├── main.py              # 程序入口
+├── app.yml              # 应用配置（版本号、数据目录等）
 ├── requirements.txt     # 依赖
 ├── icons/               # 应用图标
 ├── core/
@@ -111,6 +112,7 @@ XlsxSearcher/
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "app.yml:." \
   main.py
 ```
 
@@ -122,6 +124,7 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
+  --add-data "app.yml;." \
   main.py
 ```
 
@@ -133,16 +136,31 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "app.yml:." \
   main.py
 ```
 
 生成的可执行文件在 `dist` 目录下。
 
+## 配置
+
+应用配置文件 `app.yml` 位于项目根目录，可自定义版本号、图标路径和数据存储目录：
+
+```yaml
+# XlsxSearcher 应用配置
+app:
+  name: XlsxSearcher
+  version: "1.4.3"          # 版本号，发布时修改此处
+  icon: icons/app_icon.png   # 运行时窗口图标
+  data_dir: ~/.local/XlsxSearcher  # 数据库和日志存放目录
+```
+
 ## 数据存储
 
-索引数据库和本地偏好保存在用户目录下：
+索引数据库和日志默认保存在 `app.yml` 中 `data_dir` 指定的目录下：
 
 - **索引数据库**: `~/.local/XlsxSearcher/index.db`
+- **应用日志**: `~/.local/XlsxSearcher/app.log`
 - **本地偏好**: 通过 `QSettings` 存储（macOS: `~/Library/Preferences/`）
 
 ## 许可证
