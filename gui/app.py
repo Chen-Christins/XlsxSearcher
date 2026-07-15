@@ -542,13 +542,15 @@ class XlsxSearcherApp(QMainWindow):
         bottom_layout.addWidget(self.scan_progress)
 
     def _init_menu_bar(self):
-        menubar = self.menuBar()
-        help_menu = menubar.addMenu("帮助")
-        about_action = QAction(f"关于 XlsxSearcher {VERSION}", self)
-        about_action.triggered.connect(self._show_about)
         if sys.platform == 'darwin':
+            menubar = self.menuBar()
+            help_menu = menubar.addMenu("帮助")
+            about_action = QAction(f"关于 XlsxSearcher {VERSION}", self)
+            about_action.triggered.connect(self._show_about)
             about_action.setMenuRole(QAction.AboutRole)
-        help_menu.addAction(about_action)
+            help_menu.addAction(about_action)
+
+
 
     def _show_about(self):
         QMessageBox.about(
@@ -576,12 +578,15 @@ class XlsxSearcherApp(QMainWindow):
             self.status_bar.showMessage("预览面板已展开", 2000)
 
     def keyPressEvent(self, event):
-        """捕获 Ctrl+` / Cmd+` 折叠/展开预览"""
+        """捕获快捷键"""
         key = event.key()
         mods = event.modifiers()
         is_ctrl = mods & Qt.CTRL
         is_cmd = mods & Qt.META
-        # backtick: QuoteLeft (0x60), also check AsciiTilde on some layouts
+        if key == Qt.Key_F1:
+            self._show_about()
+            return
+        # backtick: Ctrl+` / Cmd+` 折叠/展开预览
         if (is_ctrl or is_cmd) and key in (Qt.Key_QuoteLeft, Qt.Key_AsciiTilde):
             self._toggle_preview()
             return
