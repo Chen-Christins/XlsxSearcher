@@ -3,6 +3,7 @@ import csv
 import json
 import logging
 import os
+import subprocess
 import sys
 
 import yaml
@@ -274,6 +275,62 @@ class PreviewWorker(QThread):
                 self.error.emit(str(e))
 
 
+class VcsUpdateWorker(QThread):
+    """版本控制更新工作线程：自动识别 git/svn 并执行更新"""
+    finished = pyqtSignal(str, float)  # output_text, duration
+    error = pyqtSignal(str)
+
+    def __init__(self, directory, parent=None):
+        super().__init__(parent)
+        self.directory = directory
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        import time
+        start = time.time()
+        try:
+            svn_dir = os.path.join(self.directory, '.svn')
+            git_dir = os.path.join(self.directory, '.git')
+
+            if os.path.isdir(svn_dir):
+                cmd = ['svn', 'up']
+            elif os.path.isdir(git_dir):
+                cmd = ['git', 'pull']
+            else:
+                self.error.emit('未检测到 .svn 或 .git 目录，请确认该目录受版本控制')
+                return
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=self.directory,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                shell=False,
+                encoding='utf-8',
+                errors='replace',
+            )
+            lines = []
+            for line in proc.stdout:
+                if self._cancelled:
+                    proc.terminate()
+                    return
+                lines.append(line)
+            proc.wait()
+            duration = time.time() - start
+
+            if proc.returncode != 0:
+                self.error.emit(f'命令返回非零: {proc.returncode}\n' + ''.join(lines))
+            else:
+                self.finished.emit(''.join(lines), duration)
+        except FileNotFoundError:
+            self.error.emit('未找到命令，请确认 svn/git 已安装并添加到 PATH 环境变量')
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class XlsxSearcherApp(QMainWindow):
     MAX_SEARCH_HISTORY = 15
 
@@ -371,6 +428,11 @@ class XlsxSearcherApp(QMainWindow):
         self.btn_import_aliases.clicked.connect(self._import_sheet_aliases)
         self.btn_import_aliases.setToolTip("导入 bat/txt 映射脚本，支持英文名搜索中文子表")
         top_layout.addWidget(self.btn_import_aliases)
+
+        self.btn_vcs_update = QPushButton("更新代码")
+        self.btn_vcs_update.clicked.connect(self._vcs_update)
+        self.btn_vcs_update.setToolTip("对当前目录执行 svn up 或 git pull")
+        top_layout.addWidget(self.btn_vcs_update)
 
         # 搜索区域（两行）
         search_widget = QWidget()
@@ -684,6 +746,7 @@ class XlsxSearcherApp(QMainWindow):
         for btn in [self.btn_open, self.btn_locate, self.btn_copy]:
             btn.setEnabled(has_selection)
         self.btn_export.setEnabled(bool(self.search_results))
+        self.btn_vcs_update.setEnabled(True)
 
     def _reset_preview_state(self):
         """清空当前预览和命中定位状态。"""
@@ -900,6 +963,54 @@ class XlsxSearcherApp(QMainWindow):
         else:
             _msgbox(self, 'info', '提示', '请先选择要扫描的目录')
 
+    def _vcs_update(self):
+        """对当前扫描目录执行 svn up 或 git pull"""
+        if self.is_scanning:
+            return
+        if not self.scan_directory:
+            _msgbox(self, 'info', '提示', '请先选择要扫描的目录')
+            return
+
+        svn_dir = os.path.join(self.scan_directory, '.svn')
+        git_dir = os.path.join(self.scan_directory, '.git')
+        if not os.path.isdir(svn_dir) and not os.path.isdir(git_dir):
+            _msgbox(self, 'info', '提示',
+                    f'目录 "{self.scan_directory}" 下未检测到 .svn 或 .git，请确认该目录受版本控制')
+            return
+
+        self.is_scanning = True
+        self.btn_vcs_update.setEnabled(False)
+        self.status_bar.showMessage("正在更新代码...")
+
+        self.vcs_worker = VcsUpdateWorker(self.scan_directory)
+        self.vcs_worker.finished.connect(self._on_vcs_update_complete)
+        self.vcs_worker.error.connect(self._on_vcs_update_error)
+        self.vcs_worker.start()
+
+    def _on_vcs_update_complete(self, output, duration):
+        """代码更新完成"""
+        self.is_scanning = False
+        self.btn_vcs_update.setEnabled(True)
+
+        time_str = f"{duration:.1f}秒" if duration >= 1 else f"{duration * 1000:.0f}毫秒"
+        self.status_bar.showMessage(f"更新完成，耗时 {time_str}")
+
+        # 裁剪过长输出，仅显示末尾关键信息
+        lines = output.rstrip().splitlines()
+        display = lines[-20:] if len(lines) > 20 else lines
+        text = '\n'.join(display)
+        if len(lines) > 20:
+            text = f"... (共 {len(lines)} 行，仅显示最后 20 行)\n\n{text}"
+
+        _msgbox(self, 'info', f'代码更新完成（{time_str}）', text)
+
+    def _on_vcs_update_error(self, error_msg):
+        """代码更新出错"""
+        self.is_scanning = False
+        self.btn_vcs_update.setEnabled(True)
+        self.status_bar.showMessage("更新出错")
+        _msgbox(self, 'error', '更新失败', error_msg)
+
     def _start_scan(self):
         """开始扫描（在线程中执行）"""
         if self.is_scanning:
@@ -911,7 +1022,7 @@ class XlsxSearcherApp(QMainWindow):
         self.scan_progress.setRange(0, 0)
 
         # 禁用按钮
-        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export]:
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export, self.btn_vcs_update]:
             btn.setEnabled(False)
 
         # 启动扫描线程
@@ -970,7 +1081,7 @@ class XlsxSearcherApp(QMainWindow):
         self.scan_progress.setVisible(True)
         self.scan_progress.setRange(0, 0)
 
-        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export]:
+        for btn in [self.btn_open, self.btn_locate, self.btn_copy, self.btn_export, self.btn_vcs_update]:
             btn.setEnabled(False)
 
         self.deep_worker = DeepIndexWorker(self.index_manager, self.scanner)
