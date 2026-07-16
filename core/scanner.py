@@ -67,6 +67,12 @@ class XlsxScanner:
         """判断是否为旧版 .xls 格式"""
         return os.path.splitext(filepath)[1].lower() == '.xls'
 
+    @staticmethod
+    def _raise_if_fatal(exc: BaseException) -> None:
+        """Keep process-control exceptions from being swallowed by fallback code."""
+        if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+            raise exc
+
     def get_sheet_names(self, filepath: str) -> List[str]:
         """获取表格文件的所有子表名称"""
         if self._is_xls_format(filepath):
@@ -139,7 +145,8 @@ class XlsxScanner:
                 return self._extract_cell_texts_calamine(
                     filepath, sheet_names, max_chars_per_sheet, file_size_mb
                 )
-            except Exception as e:
+            except BaseException as e:
+                self._raise_if_fatal(e)
                 print(f"calamine 提取失败，回退到 openpyxl: {os.path.basename(filepath)}: {e}")
 
         return self._extract_cell_texts_openpyxl(filepath, sheet_names, max_chars_per_sheet, file_size_mb)
