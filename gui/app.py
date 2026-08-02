@@ -519,10 +519,11 @@ class XlsxSearcherApp(QMainWindow):
 
         # 结果树
         self.result_tree = QTreeWidget()
-        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
+        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "别名", "文件路径"])
         self.result_tree.setColumnWidth(0, 280)
         self.result_tree.setColumnWidth(1, 100)
-        self.result_tree.setColumnWidth(2, 500)
+        self.result_tree.setColumnWidth(2, 180)
+        self.result_tree.setColumnWidth(3, 420)
         self.result_tree.setAlternatingRowColors(True)
         self.result_tree.setRootIsDecorated(True)
 
@@ -1195,16 +1196,23 @@ class XlsxSearcherApp(QMainWindow):
         self._pending_status_prefix = ''
         self._update_status_summary(prefix=effective_prefix)
 
+    @staticmethod
+    def _sheet_alias_text(result, sheet_name):
+        """取子表对应的别名，多个别名用逗号拼接。"""
+        aliases = result.get('sheet_aliases', {}).get(sheet_name, [])
+        return ', '.join(aliases)
+
     def _update_grouped_results(self):
         """按文件分组展示结果"""
         self.result_tree.setRootIsDecorated(True)
-        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "文件路径"])
+        self.result_tree.setHeaderLabels(["文件名 / 子表", "命中子表数", "别名", "文件路径"])
         self.result_tree.setUpdatesEnabled(False)
 
         for result in self.search_results:
             top_item = QTreeWidgetItem([
                 result['filename'],
                 str(result.get('sheet_count', 0)),
+                '',
                 result['filepath']
             ])
             top_item.setData(0, Qt.UserRole, result['filepath'])
@@ -1215,6 +1223,7 @@ class XlsxSearcherApp(QMainWindow):
                 child_item = QTreeWidgetItem([
                     sheet_name,
                     '',
+                    self._sheet_alias_text(result, sheet_name),
                     result['filepath']
                 ])
                 child_item.setData(0, Qt.UserRole, result['filepath'])
@@ -1229,7 +1238,7 @@ class XlsxSearcherApp(QMainWindow):
     def _update_flat_results(self):
         """按旧版平铺列表展示结果"""
         self.result_tree.setRootIsDecorated(False)
-        self.result_tree.setHeaderLabels(["文件名", "子表名称", "文件路径"])
+        self.result_tree.setHeaderLabels(["文件名", "子表名称", "别名", "文件路径"])
         self.result_tree.setUpdatesEnabled(False)
 
         for result in self.search_results:
@@ -1239,6 +1248,7 @@ class XlsxSearcherApp(QMainWindow):
                     item = QTreeWidgetItem([
                         result['filename'],
                         sheet_name,
+                        self._sheet_alias_text(result, sheet_name),
                         result['filepath']
                     ])
                     item.setData(0, Qt.UserRole, result['filepath'])
@@ -1248,6 +1258,7 @@ class XlsxSearcherApp(QMainWindow):
 
             item = QTreeWidgetItem([
                 result['filename'],
+                '',
                 '',
                 result['filepath']
             ])
@@ -1676,7 +1687,7 @@ class XlsxSearcherApp(QMainWindow):
         try:
             with open(file_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow(['文件名', '子表名称', '文件路径', '命中子表数'])
+                writer.writerow(['文件名', '子表名称', '别名', '文件路径', '命中子表数'])
 
                 for result in self.search_results:
                     sheet_names = result.get('sheet_names', [])
@@ -1685,6 +1696,7 @@ class XlsxSearcherApp(QMainWindow):
                             writer.writerow([
                                 result['filename'],
                                 sheet_name,
+                                self._sheet_alias_text(result, sheet_name),
                                 result['filepath'],
                                 result.get('sheet_count', 0)
                             ])
@@ -1692,6 +1704,7 @@ class XlsxSearcherApp(QMainWindow):
 
                     writer.writerow([
                         result['filename'],
+                        '',
                         '',
                         result['filepath'],
                         result.get('sheet_count', 0)
@@ -1833,9 +1846,9 @@ def _apply_macos_unified_titlebar(window):
             ns_window, sel_setStyleMask, current_mask | NSWindowStyleMaskFullSizeContentView
         )
 
-        # 3. movableByWindowBackground = YES (允许从内容区拖拽窗口)
-        sel_movable = objc.sel_registerName(b'setMovableByWindowBackground:')
-        msg(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_byte)(ns_window, sel_movable, True)
+        # 3. 保持 movableByWindowBackground = NO：macOS 下若开启，
+        #    QHeaderView 的列拖动/调宽会被 AppKit 误判成拖动整个窗口；
+        #    顶部区域的窗口拖拽已由 eventFilter 中的 startSystemMove() 负责
 
         # 4. 隐藏原生标题文字，避免与控件重叠
         # NSWindowTitleHidden = 1
