@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **CLI**: 新增 `cli.py`，提供 `scan` / `deep-index` / `search` / `export` / `alias` / `stats` 子命令，不依赖 PyQt，支持 text / json / csv 输出
+- **Ask 问答**: 新增 `ask` 子命令，基于索引召回子表名与单元格命中，构造带出处的证据后调用 OpenAI 兼容接口回答；支持 `--dry-run` 预览请求内容
+- **CLI 打包**: CI 与 README 打包示例同时构建 GUI 和 CLI，各平台产物 zip 内包含 `XlsxSearcher` 与 `xlsxsearcher`
+- **CLI 版本号**: 新增 `--version` / `version` 子命令，从 `app.yml` 读取版本号输出
+
 ## [1.4.3] - 2026-07-13
 
 ## What's Changed

@@ -48,6 +48,22 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### CLI
+
+The CLI shares the same SQLite index without requiring the GUI, which is useful for scripting and automation:
+
+```bash
+python cli.py scan ./configs
+python cli.py deep-index
+python cli.py search --sheet ItemConfig --format json
+python cli.py export result.csv --cell 新手礼包
+python cli.py alias import alias.txt
+python cli.py ask "新手礼包在哪个表"
+python cli.py --version
+```
+
+`ask` first retrieves matching sheets/cells from the index, then sends the evidence to an OpenAI-compatible endpoint. Configure it with `XLSXSEARCHER_API_KEY`, `XLSXSEARCHER_MODEL`, and `XLSXSEARCHER_BASE_URL` (or the standard `OPENAI_*` variables). Use `--dry-run` to inspect the retrieval evidence without calling a model.
+
 ### Workflow
 
 1. Click **"Select Directory"** to choose a folder to scan
@@ -91,6 +107,7 @@ Other features:
 ```
 XlsxSearcher/
 ├── main.py              # Entry point
+├── cli.py               # CLI entrypoint (scan/search/export/ask)
 ├── app.yml              # App config (version, data dir, etc.)
 ├── requirements.txt     # Dependencies
 ├── icons/               # App icons
@@ -114,9 +131,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml:." \
+  cli.py
 ```
 
-The generated `.app` is in the `dist` directory. Extract and double-click to run.
+Both `XlsxSearcher.app` and the `xlsxsearcher` CLI binary are in the `dist` directory. Extract the `.app` and double-click to run.
 
 ### Windows
 
@@ -126,9 +146,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png;icons" \
   --add-data "app.yml;." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml;." \
+  cli.py
 ```
 
-The generated `.exe` is in the `dist` directory.
+Both `XlsxSearcher.exe` and `xlsxsearcher.exe` are in the `dist` directory.
 
 ### Linux
 
@@ -138,9 +161,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml:." \
+  cli.py
 ```
 
-The generated executable is in the `dist` directory.
+Both the `XlsxSearcher` GUI executable and the `xlsxsearcher` CLI binary are in the `dist` directory.
 
 ## Configuration
 

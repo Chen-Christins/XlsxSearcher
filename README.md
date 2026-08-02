@@ -48,6 +48,30 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### CLI 使用
+
+CLI 不依赖 GUI，复用同一个 SQLite 索引，适合脚本和自动化：
+
+```bash
+python cli.py scan ./configs
+python cli.py deep-index
+python cli.py search --sheet ItemConfig --format json
+python cli.py export result.csv --cell 新手礼包
+python cli.py alias import alias.txt
+python cli.py ask "新手礼包在哪个表"
+python cli.py --version
+```
+
+`ask` 会先基于索引做子表名/单元格内容召回，再把命中证据交给模型回答。默认走 OpenAI 兼容接口，可通过环境变量配置：
+
+```bash
+export XLSXSEARCHER_API_KEY=sk-xxx
+export XLSXSEARCHER_MODEL=gpt-4o-mini
+export XLSXSEARCHER_BASE_URL=https://api.openai.com/v1
+```
+
+也兼容 `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_BASE_URL`。不确定效果时先用 `python cli.py ask "问题" --dry-run` 查看检索证据和请求内容。
+
 ### 操作流程
 
 1. 点击 **「选择目录」** 选择要扫描的文件夹
@@ -91,6 +115,7 @@ python main.py
 ```
 XlsxSearcher/
 ├── main.py              # 程序入口
+├── cli.py               # CLI 入口（扫描/搜索/导出/问答）
 ├── app.yml              # 应用配置（版本号、数据目录等）
 ├── requirements.txt     # 依赖
 ├── icons/               # 应用图标
@@ -114,9 +139,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml:." \
+  cli.py
 ```
 
-生成的 `.app` 在 `dist` 目录下，解压后双击运行。
+生成的 `XlsxSearcher.app` 和 CLI 可执行文件 `xlsxsearcher` 都在 `dist` 目录下，`.app` 解压后双击运行。
 
 ### Windows
 
@@ -126,9 +154,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png;icons" \
   --add-data "app.yml;." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml;." \
+  cli.py
 ```
 
-生成的 `.exe` 在 `dist` 目录下。
+生成的 `XlsxSearcher.exe` 和 CLI 可执行文件 `xlsxsearcher.exe` 都在 `dist` 目录下。
 
 ### Linux
 
@@ -138,9 +169,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
+pyinstaller --onefile --name xlsxsearcher \
+  --add-data "app.yml:." \
+  cli.py
 ```
 
-生成的可执行文件在 `dist` 目录下。
+生成的可执行文件 `XlsxSearcher` 和 CLI 可执行文件 `xlsxsearcher` 都在 `dist` 目录下。
 
 ## 配置
 
