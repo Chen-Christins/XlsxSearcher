@@ -56,6 +56,7 @@ CLI 不依赖 GUI，复用同一个 SQLite 索引，适合脚本和自动化：
 python cli.py scan ./configs
 python cli.py deep-index
 python cli.py search --sheet ItemConfig --format json
+python cli.py hits --cell 0.41 --format json
 python cli.py export result.csv --cell 新手礼包
 python cli.py alias import alias.txt
 python cli.py ask "新手礼包在哪个表"

@@ -82,6 +82,16 @@ def _write_csv_rows(results, writer) -> None:
             ])
 
 
+def _excel_col_letter(col: int) -> str:
+    """把 1-based 列号转成 Excel 列字母。"""
+    letters = ''
+    n = int(col)
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        letters = chr(ord('A') + remainder) + letters
+    return letters
+
+
 def _write_csv_file(results, output_path: str) -> None:
     with open(output_path, 'w', newline='', encoding='utf-8-sig') as f:
         _write_csv_rows(results, csv.writer(f))
@@ -249,6 +259,116 @@ def cmd_search(args) -> int:
         return 0
     _write_search_output(results, args.format, sys.stdout)
     return 0
+
+
+def cmd_hits(args) -> int:
+    """查找单元格内容的每一个命中坐标，用于回答“多少个/哪一行/哪一列”。"""
+    if not args.cell:
+        raise CliError('hits 需要 --cell 参数')
+
+    manager = _make_manager(args)
+    if manager.get_stats()['file_count'] == 0:
+        raise CliError('索引为空，请先运行 scan')
+
+    searcher = Searcher(manager)
+    # 索引层先模糊召回候选子表，单元格级别的精确/前缀判断交给 find_sheet_matches。
+    results = searcher.search(cell_keyword=args.cell, match_mode='fuzzy')
+    if not results:
+        output = {'keyword': args.cell, 'total_hits': 0, 'files': []}
+        _emit_hits_output(output, args, sys.stdout)
+        return 0
+
+    scanner = XlsxScanner(use_calamine=True)
+    output = {'keyword': args.cell, 'total_hits': 0, 'files': []}
+    for result in results:
+        for sheet_name in result.get('sheet_names', []):
+            filepath = result['filepath']
+            try:
+                hits = scanner.find_sheet_matches(
+                    filepath, sheet_name, args.cell,
+                    match_mode=args.match, max_hits=args.max_hits,
+                )
+            except Exception as exc:
+                raise CliError(f'读取命中失败 {filepath}: {exc}')
+
+            if len(hits) >= args.max_hits:
+                print(
+                    f'提示: {sheet_name} 的命中数可能超过 {args.max_hits}，'
+                    '可用 --max-hits 调大',
+                    file=sys.stderr,
+                )
+
+            normalized = [
+                {
+                    'row': hit['row'],
+                    'col': hit['col'],
+                    'column': _excel_col_letter(hit['col']),
+                    'value': hit.get('value', ''),
+                }
+                for hit in hits
+            ]
+            output['files'].append({
+                'filename': result['filename'],
+                'filepath': filepath,
+                'sheet_name': sheet_name,
+                'hit_count': len(normalized),
+                'rows': sorted({hit['row'] for hit in normalized}),
+                'columns': sorted({hit['column'] for hit in normalized}),
+                'hits': normalized,
+            })
+            output['total_hits'] += len(normalized)
+
+    if args.output:
+        encoding = 'utf-8-sig' if args.format == 'csv' else 'utf-8'
+        with open(args.output, 'w', newline='', encoding=encoding) as stream:
+            _emit_hits_output(output, args, stream)
+        print(f'已导出 {output["total_hits"]} 个命中到 {args.output}')
+        return 0
+
+    _emit_hits_output(output, args, sys.stdout)
+    return 0
+
+
+def _emit_hits_output(output, args, stream) -> None:
+    """按 text / json / csv 输出 hits 结果。"""
+    if args.format == 'json':
+        json.dump(output, stream, ensure_ascii=False, indent=2)
+        stream.write('\n')
+        return
+
+    if args.format == 'csv':
+        writer = csv.writer(stream)
+        writer.writerow(['文件名', '子表名称', '行', '列', '单元格值'])
+        for file_info in output['files']:
+            for hit in file_info['hits']:
+                writer.writerow([
+                    file_info['filename'],
+                    file_info['sheet_name'],
+                    hit['row'],
+                    hit['column'],
+                    hit['value'],
+                ])
+        return
+
+    if output['total_hits'] == 0:
+        print(f"未找到 {output['keyword']}", file=stream)
+        return
+
+    distinct_rows = sorted({row for file_info in output['files'] for row in file_info['rows']})
+    distinct_cols = sorted({col for file_info in output['files'] for col in file_info['columns']})
+    print(
+        f"找到 {output['keyword']} 共 {output['total_hits']} 个，"
+        f'分布在 {len(distinct_rows)} 行，列: {", ".join(distinct_cols) or "-"}',
+        file=stream,
+    )
+    for file_info in output['files']:
+        print(
+            f"{file_info['filename']} / {file_info['sheet_name']} "
+            f"({file_info['hit_count']} 个，行: {', '.join(map(str, file_info['rows'])) or '-'})",
+            file=stream,
+        )
+        for hit in file_info['hits']:
+            print(f"  {hit['column']}{hit['row']}: {hit['value']}", file=stream)
 
 
 def cmd_export(args) -> int:
@@ -565,6 +685,14 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument('--format', choices=['text', 'json', 'csv'], default='text')
     search_parser.add_argument('--export', default=None, help='导出 CSV 文件路径')
     search_parser.set_defaults(func=cmd_search)
+
+    hits_parser = subparsers.add_parser('hits', parents=[db_parser], help='输出单元格命中的行/列/数量')
+    hits_parser.add_argument('--cell', default='', help='单元格内容关键字')
+    hits_parser.add_argument('--match', choices=['fuzzy', 'prefix', 'exact'], default='fuzzy')
+    hits_parser.add_argument('--max-hits', type=int, default=100000, help='单个子表最多返回的命中数')
+    hits_parser.add_argument('--format', choices=['text', 'json', 'csv'], default='text')
+    hits_parser.add_argument('--output', default=None, help='结果文件路径（csv 默认带 BOM，适合 Excel 打开）')
+    hits_parser.set_defaults(func=cmd_hits)
 
     export_parser = subparsers.add_parser('export', parents=[db_parser], help='导出搜索结果为 CSV')
     _add_search_args(export_parser)

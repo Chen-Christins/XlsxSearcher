@@ -56,6 +56,7 @@ The CLI shares the same SQLite index without requiring the GUI, which is useful 
 python cli.py scan ./configs
 python cli.py deep-index
 python cli.py search --sheet ItemConfig --format json
+python cli.py hits --cell 0.41 --format json
 python cli.py export result.csv --cell 新手礼包
 python cli.py alias import alias.txt
 python cli.py ask "新手礼包在哪个表"

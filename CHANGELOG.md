@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - **Ask 问答**: 新增 `ask` 子命令，基于索引召回子表名与单元格命中，构造带出处的证据后调用 OpenAI 兼容接口回答；支持 `--dry-run` 预览请求内容
 - **CLI 打包**: CI 与 README 打包示例同时构建 GUI 和 CLI，各平台产物 zip 内包含 `XlsxSearcher` 与 `XlsxSearcherCLI`（Windows 下为 `XlsxSearcherCLI.exe`）
 - **CLI 版本号**: 新增 `--version` / `version` 子命令，从 `app.yml` 读取版本号输出
+- **CLI 命中坐标**: 新增 `hits` 子命令，输出单元格命中的总数、行号、列字母和单元格值，支持 text / json / csv
 
 ## [1.4.3] - 2026-07-13
 

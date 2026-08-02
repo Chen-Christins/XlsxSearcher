@@ -1,6 +1,7 @@
 """xlsx/xls文件扫描器 - 递归扫描目录并提取子表名称"""
 import os
 import re
+import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Callable
@@ -101,7 +102,7 @@ class XlsxScanner:
             wb = xlrd.open_workbook(filepath, on_demand=True)
             return wb.sheet_names()
         except Exception as e:
-            print(f"警告: 读取 .xls 文件失败 {filepath}: {e}")
+            print(f"警告: 读取 .xls 文件失败 {filepath}: {e}", file=sys.stderr)
             return []
 
     def _get_sheet_names_slow(self, filepath: str) -> List[str]:
@@ -112,7 +113,7 @@ class XlsxScanner:
             wb.close()
             return sheet_names
         except Exception as e:
-            print(f"警告: 无法读取文件 {filepath}: {e}")
+            print(f"警告: 无法读取文件 {filepath}: {e}", file=sys.stderr)
             return []
 
     def extract_cell_texts(self, filepath: str, sheet_names: List[str],
@@ -131,7 +132,10 @@ class XlsxScanner:
         except OSError:
             file_size_mb = 0
         if file_size_mb > 80:
-            print(f"警告: 跳过超大文件 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)，避免内存溢出")
+            print(
+                f"警告: 跳过超大文件 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)，避免内存溢出",
+                file=sys.stderr,
+            )
             return [''] * len(sheet_names)
 
         if self.use_calamine and HAS_CALAMINE:
@@ -140,7 +144,10 @@ class XlsxScanner:
                     filepath, sheet_names, max_chars_per_sheet, file_size_mb
                 )
             except Exception as e:
-                print(f"calamine 提取失败，回退到 openpyxl: {os.path.basename(filepath)}: {e}")
+                print(
+                    f"calamine 提取失败，回退到 openpyxl: {os.path.basename(filepath)}: {e}",
+                    file=sys.stderr,
+                )
 
         return self._extract_cell_texts_openpyxl(filepath, sheet_names, max_chars_per_sheet, file_size_mb)
 
@@ -200,10 +207,13 @@ class XlsxScanner:
                 results.append(' '.join(parts))
             return results
         except MemoryError:
-            print(f"警告: 提取单元格文本内存不足 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)")
+            print(
+                f"警告: 提取单元格文本内存不足 {os.path.basename(filepath)} ({file_size_mb:.0f}MB)",
+                file=sys.stderr,
+            )
             return [''] * len(sheet_names)
         except Exception as e:
-            print(f"警告: 提取单元格文本失败 {os.path.basename(filepath)}: {e}")
+            print(f"警告: 提取单元格文本失败 {os.path.basename(filepath)}: {e}", file=sys.stderr)
             return [''] * len(sheet_names)
         finally:
             if wb is not None:
@@ -237,10 +247,10 @@ class XlsxScanner:
                 results.append(' '.join(parts))
             return results
         except MemoryError:
-            print(f"警告: 提取 .xls 单元格文本内存不足 {os.path.basename(filepath)}")
+            print(f"警告: 提取 .xls 单元格文本内存不足 {os.path.basename(filepath)}", file=sys.stderr)
             return [''] * len(sheet_names)
         except Exception as e:
-            print(f"警告: 提取 .xls 单元格文本失败 {os.path.basename(filepath)}: {e}")
+            print(f"警告: 提取 .xls 单元格文本失败 {os.path.basename(filepath)}: {e}", file=sys.stderr)
             return [''] * len(sheet_names)
         finally:
             if wb is not None:
@@ -285,7 +295,7 @@ class XlsxScanner:
                     filepath, sheet_name, max_rows, max_cols, start_row, start_col
                 )
             except BaseException as e:
-                print(f"calamine 读取预览失败，回退到 openpyxl: {e}")
+                print(f"calamine 读取预览失败，回退到 openpyxl: {e}", file=sys.stderr)
 
         try:
             wb = load_workbook(filepath, read_only=True, data_only=True)
@@ -305,7 +315,7 @@ class XlsxScanner:
             wb.close()
             return data
         except Exception as e:
-            print(f"警告: 读取预览数据失败 {filepath}: {e}")
+            print(f"警告: 读取预览数据失败 {filepath}: {e}", file=sys.stderr)
             return []
 
     def _read_sheet_preview_xls(self, filepath: str, sheet_name: str,
@@ -332,7 +342,7 @@ class XlsxScanner:
             wb.release_resources()
             return data
         except Exception as e:
-            print(f"警告: 读取 .xls 预览数据失败 {filepath}: {e}")
+            print(f"警告: 读取 .xls 预览数据失败 {filepath}: {e}", file=sys.stderr)
             return []
 
     # ---- 合并的 read_sheet_with_hits：一次打开文件，返回命中和预览数据 ----
@@ -370,7 +380,7 @@ class XlsxScanner:
                     preview_rows, preview_cols, start_row, start_col
                 )
             except BaseException as e:
-                print(f"calamine 读取失败，回退到 openpyxl: {e}")
+                print(f"calamine 读取失败，回退到 openpyxl: {e}", file=sys.stderr)
 
         return self._read_sheet_with_hits_openpyxl(
             filepath, sheet_name, keyword, match_mode, max_hits,
@@ -569,7 +579,7 @@ class XlsxScanner:
             finally:
                 wb.release_resources()
         except Exception as e:
-            print(f"警告: 读取 .xls 命中/预览失败 {filepath}: {e}")
+            print(f"警告: 读取 .xls 命中/预览失败 {filepath}: {e}", file=sys.stderr)
             return [], [], []
 
     def find_sheet_matches(self, filepath: str, sheet_name: str, keyword: str,
@@ -636,7 +646,7 @@ class XlsxScanner:
                         if sheet_names:
                             pending_updates.append((fn, fp, mt, sheet_names))
                     except Exception as e:
-                        print(f"警告: 处理文件失败 {fp}: {e}")
+                        print(f"警告: 处理文件失败 {fp}: {e}", file=sys.stderr)
                     finally:
                         if progress_callback and (
                             processed % _PROGRESS_INTERVAL == 0 or processed == total_files

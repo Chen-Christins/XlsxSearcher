@@ -1,6 +1,7 @@
 """索引管理器 - 使用SQLite存储xlsx文件索引"""
 import os
 import sqlite3
+import sys
 import threading
 from typing import Dict, List, Tuple
 
@@ -145,7 +146,7 @@ class IndexManager:
                 ''')
             return True
         except sqlite3.OperationalError as e:
-            print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}")
+            print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}", file=sys.stderr)
             for trig in ('sheets_fts_ai', 'sheets_fts_ad', 'sheets_fts_au',
                          'sheets_fts_names_ai', 'sheets_fts_names_ad', 'sheets_fts_names_au'):
                 try:
