@@ -139,12 +139,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
-pyinstaller --onefile --name xlsxsearcher \
+pyinstaller --onefile --name XlsxSearcherCLI \
   --add-data "app.yml:." \
   cli.py
 ```
 
-生成的 `XlsxSearcher.app` 和 CLI 可执行文件 `xlsxsearcher` 都在 `dist` 目录下，`.app` 解压后双击运行。
+生成的 `XlsxSearcher.app` 和 CLI 可执行文件 `XlsxSearcherCLI` 都在 `dist` 目录下，`.app` 解压后双击运行。
 
 ### Windows
 
@@ -154,12 +154,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png;icons" \
   --add-data "app.yml;." \
   main.py
-pyinstaller --onefile --name xlsxsearcher \
+pyinstaller --onefile --name XlsxSearcherCLI \
   --add-data "app.yml;." \
   cli.py
 ```
 
-生成的 `XlsxSearcher.exe` 和 CLI 可执行文件 `xlsxsearcher.exe` 都在 `dist` 目录下。
+生成的 `XlsxSearcher.exe` 和 CLI 可执行文件 `XlsxSearcherCLI.exe` 都在 `dist` 目录下。
 
 ### Linux
 
@@ -169,12 +169,12 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
-pyinstaller --onefile --name xlsxsearcher \
+pyinstaller --onefile --name XlsxSearcherCLI \
   --add-data "app.yml:." \
   cli.py
 ```
 
-生成的可执行文件 `XlsxSearcher` 和 CLI 可执行文件 `xlsxsearcher` 都在 `dist` 目录下。
+生成的可执行文件 `XlsxSearcher` 和 CLI 可执行文件 `XlsxSearcherCLI` 都在 `dist` 目录下。
 
 ## 配置
 
