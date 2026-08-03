@@ -1,6 +1,7 @@
 """索引管理器 - 使用SQLite存储xlsx文件索引"""
 import os
 import sqlite3
+import sys
 import threading
 from typing import Dict, List, Tuple
 
@@ -145,7 +146,7 @@ class IndexManager:
                 ''')
             return True
         except sqlite3.OperationalError as e:
-            print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}")
+            print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}", file=sys.stderr)
             for trig in ('sheets_fts_ai', 'sheets_fts_ad', 'sheets_fts_au',
                          'sheets_fts_names_ai', 'sheets_fts_names_ad', 'sheets_fts_names_au'):
                 try:
@@ -483,6 +484,18 @@ class IndexManager:
             'mapping_count': row[1] if row else 0,
         }
 
+    def get_all_sheet_aliases(self) -> Dict[str, List[str]]:
+        """返回全部子表名到别名列表的映射（去重），供展示和导出使用。"""
+        conn = self._conn()
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT DISTINCT alias_name, sheet_name FROM sheet_aliases ORDER BY alias_name'
+        )
+        aliases: Dict[str, List[str]] = {}
+        for alias_name, sheet_name in cursor.fetchall():
+            aliases.setdefault(sheet_name, []).append(alias_name)
+        return aliases
+
     def get_index_status(self) -> Dict:
         """返回索引覆盖情况，供状态栏和提示文案使用。"""
         conn = self._conn()
@@ -573,9 +586,14 @@ class IndexManager:
                 entry['sheet_names'].append(sheet_name)
 
         results = list(grouped.values())
+        aliases_by_sheet = self.get_all_sheet_aliases() if results else {}
         for result in results:
             result['sheet_count'] = len(result['sheet_names'])
             result['sheet_names_display'] = ', '.join(result['sheet_names'])
+            result['sheet_aliases'] = {
+                sheet_name: aliases_by_sheet.get(sheet_name, [])
+                for sheet_name in result['sheet_names']
+            }
         return results
 
     def get_all_files_with_sheets(self, sort_mode: str = 'filename_asc') -> List[Dict]:

@@ -7,7 +7,15 @@
 
 ## Packaging
 - `pyinstaller` is not listed in `requirements.txt`; install it separately before packaging, matching CI: `python -m pip install --upgrade pip && pip install -r requirements.txt && pip install pyinstaller`.
-- CI builds the app from `main.py` with `pyinstaller --onefile --windowed --name ... main.py` on macOS, Windows, and Ubuntu. Trust `.github/workflows/build.yml` over the README packaging examples.
+- CI builds the GUI from `main.py` with `pyinstaller --onefile --windowed --name ... main.py` and the CLI from `cli.py` with `pyinstaller --onefile --name XlsxSearcherCLI ... cli.py` on macOS, Windows, and Ubuntu. Trust `.github/workflows/build.yml` over the README packaging examples.
+
+## Agent CLI Usage
+- The CLI entrypoint is `python cli.py`; the packaged executable is `XlsxSearcherCLI` (Windows: `XlsxSearcherCLI.exe`).
+- The CLI shares the GUI's SQLite index at `~/.local/XlsxSearcher/index.db`; no `--db` is needed unless a different index is intended.
+- Use `python cli.py search --sheet <keyword> --format json` for deterministic search answers; results go to stdout, progress/warnings go to stderr, and exit code 0 means success.
+- Available commands: `scan`, `deep-index`, `search`, `export`, `alias import|list`, `stats`, `ask`, and `version`/`--version`.
+- `ask` retrieves matching sheets/cells first and then calls an OpenAI-compatible endpoint; prefer `python cli.py ask "<question>" --dry-run` to inspect retrieval evidence without making a network request.
+- For `ask`, configure `OPENAI_API_KEY`/`XLSXSEARCHER_API_KEY`, `OPENAI_MODEL`/`XLSXSEARCHER_MODEL`, and `OPENAI_BASE_URL`/`XLSXSEARCHER_BASE_URL`.
 
 ## Architecture
 - `main.py` is only a thin entrypoint; the real app wiring lives in `gui/app.py`.

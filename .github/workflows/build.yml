@@ -20,12 +20,15 @@ jobs:
           - os: macos-latest
             artifact_name: XlsxSearcher-macos
             exe_name: XlsxSearcher
+            cli_exe_name: XlsxSearcherCLI
           - os: windows-latest
             artifact_name: XlsxSearcher-windows
             exe_name: XlsxSearcher.exe
+            cli_exe_name: XlsxSearcherCLI.exe
           - os: ubuntu-latest
             artifact_name: XlsxSearcher-linux
             exe_name: XlsxSearcher
+            cli_exe_name: XlsxSearcherCLI
 
     steps:
       - name: Checkout code
@@ -60,19 +63,22 @@ jobs:
             --add-data "icons/app_icon.png${SEP}icons" \
             --add-data "app.yml${SEP}." \
             main.py
+          pyinstaller --onefile --name ${{ matrix.cli_exe_name }} \
+            --add-data "app.yml${SEP}." \
+            cli.py
 
       - name: Create artifact
         shell: bash
         run: |
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell -Command "Compress-Archive -Path ${{ matrix.exe_name }} -DestinationPath ${{ matrix.artifact_name }}.zip -Force"
+            powershell -Command "Compress-Archive -Path '${{ matrix.exe_name }}','${{ matrix.cli_exe_name }}' -DestinationPath '${{ matrix.artifact_name }}.zip' -Force"
           elif [ "${{ matrix.os }}" = "macos-latest" ]; then
             # macOS .app is a directory bundle — must use -r and NOT use -j
-            zip -ry ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}.app
+            zip -ry ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}.app ${{ matrix.cli_exe_name }}
           else
             # Linux single binary
-            zip -j ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}
+            zip -j ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }} ${{ matrix.cli_exe_name }}
           fi
           ls -la
 
