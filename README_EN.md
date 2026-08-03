@@ -18,7 +18,7 @@ Excel Config Table Search Tool — Quickly locate sheets and cell data in xlsx/x
 - ↕️ **Result Sorting**: Sort results by file name or number of matching sheets
 - 📈 **Result Statistics**: Status bar shows real-time count of matching files and sheets
 - 🧾 **Index Status**: Displays scanned file count, sheet count, deep index coverage, and pending count
-- 🏷️ **Alias Mapping**: Import mapping files to search Chinese sheet names using English config names
+- 🏷️ **Alias Mapping**: Import mapping files to search Chinese sheet names using English config names, and show each sheet's aliases in results
 - 🕘 **Recent Searches**: Save the last 15 search combinations, one-click restore
 - 📂 **Open File**: Double-click or use button to open file directly in Excel
 - 🎯 **Locate in Finder**: Reveal and select the file in Explorer/Finder

@@ -2,7 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.4.4] - 2026-07-14
+
+### Added
+- **结果展示子表别名**：搜索结果（分组视图/列表视图/CSV 导出）新增“别名”列，显示导入映射中与每个子表对应的英文配置名
+
+### Fixed
+- **macOS 列头拖动误拖窗口**：移除 macOS 的 `movableByWindowBackground`，恢复结果树列头的拖动/调宽；窗口拖拽仍由顶部区域的 `startSystemMove()` 负责
 
 ## [1.4.3] - 2026-07-13
 
