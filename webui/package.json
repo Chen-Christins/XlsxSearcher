@@ -1,0 +1,13 @@
+{
+  "name": "xlsxsearcher-webui",
+  "version": "1.5.0-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc && node build.mjs",
+    "watch": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

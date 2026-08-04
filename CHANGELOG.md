@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Web 技术栈桌面客户端**：新增 PyWebView 桌面壳 + TypeScript 前端，扫描、搜索、深度索引、预览和原生文件操作继续复用现有 Python core；新增 `webui/` 前端工程和本地 API 服务
+- **流水线支持 Web UI 构建**：CI 增加 Node 构建步骤，PyInstaller 打包时携带 `webui/dist` 和 pywebview 运行时
+- **Web 界面模式**：桌面客户端顶部新增「Web 界面」按钮，可在系统浏览器中打开同一界面；也可用 `python -m webui.web` 直接以浏览器模式运行
+
+### Removed
+- 删除旧版 PyQt5 界面 `gui/app.py` 及其依赖，`main.py` 现在只启动 Web 技术栈桌面客户端
+
+### Fixed
+- 修复预览面板占位提示在选中子表后仍显示的问题
+- 恢复 `Ctrl+`` / `Cmd+`` 一键折叠/展开预览栏
+- 折叠预览栏时同步收回高度，结果列表占满剩余空间
+
 ## [1.4.4] - 2026-07-14
 
 ### Added

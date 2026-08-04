@@ -372,7 +372,7 @@ def run():
 
 
 def _run_deep_index(index_manager, scanner):
-    """复刻 DeepIndexWorker 的核心逻辑（无 GUI）。"""
+    """复刻后端深度索引任务的核心逻辑（无 GUI）。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from collections import defaultdict
     pending = index_manager.get_sheets_without_cell_text()

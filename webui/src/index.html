@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XlsxSearcher</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="icon-search" viewBox="0 0 24 24">
+      <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+      <line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24">
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-refresh" viewBox="0 0 24 24">
+      <path d="M20 11a8 8 0 1 0-2.3 5.7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="M20 5v6h-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-database" viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5" rx="8" ry="3" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3" fill="none" stroke="currentColor" stroke-width="2"/>
+    </symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24">
+      <path d="M12 16V4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="m6 9 6-5 6 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24">
+      <path d="M4 7h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="M9 7V4h6v3M6 7l1 13h10l1-13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24">
+      <path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M14 3v4h4M9 13h6M9 17h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-table" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M3 9h18M9 9v11" fill="none" stroke="currentColor" stroke-width="2"/>
+    </symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24">
+      <path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24">
+      <path d="M12 21s-7-5.3-7-11a7 7 0 0 1 14 0c0 5.7-7 11-7 11Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      <circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+    </symbol>
+    <symbol id="icon-copy" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M5 15V5a2 2 0 0 1 2-2h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24">
+      <path d="M12 4v12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <path d="m6 11 6 5 6-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4 20h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24">
+      <path d="m5 13 4 4L19 7" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="icon-browser" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M3 12h18" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M12 3c3 3.5 3 14 0 18M12 3c-3 3.5-3 14 0 18" fill="none" stroke="currentColor" stroke-width="2"/>
+    </symbol>
+  </svg>
+
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">X</div>
+        <div class="brand-text">
+          <h1>XlsxSearcher</h1>
+          <span id="version-pill" class="version-pill">v...</span>
+        </div>
+      </div>
+      <div class="directory-cell">
+        <button id="pick-dir-btn" class="btn btn-primary">
+          <svg class="icon"><use href="#icon-folder"/></svg>
+          <span>选择目录</span>
+        </button>
+        <span id="dir-path" class="path-text muted">未选择目录</span>
+      </div>
+      <div class="top-actions">
+        <button id="scan-btn" class="btn">
+          <svg class="icon"><use href="#icon-refresh"/></svg>
+          <span>重新扫描</span>
+        </button>
+        <button id="deep-index-btn" class="btn">
+          <svg class="icon"><use href="#icon-database"/></svg>
+          <span>深度索引</span>
+        </button>
+        <button id="import-alias-btn" class="btn">
+          <svg class="icon"><use href="#icon-upload"/></svg>
+          <span>导入映射</span>
+        </button>
+        <button id="open-browser-btn" class="btn">
+          <svg class="icon"><use href="#icon-browser"/></svg>
+          <span>Web 界面</span>
+        </button>
+        <button id="clear-index-btn" class="btn btn-danger">
+          <svg class="icon"><use href="#icon-trash"/></svg>
+          <span>清空索引</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="search-panel">
+      <div class="search-grid">
+        <label class="field">
+          <span class="field-label">子表名称</span>
+          <span class="input-wrap">
+            <svg class="icon input-icon"><use href="#icon-search"/></svg>
+            <input id="sheet-input" type="text" placeholder="子表名称或英文配置名" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </span>
+        </label>
+        <label class="field">
+          <span class="field-label">文件名</span>
+          <span class="input-wrap">
+            <svg class="icon input-icon"><use href="#icon-file"/></svg>
+            <input id="filename-input" type="text" placeholder="文件名" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </span>
+        </label>
+        <label class="field">
+          <span class="field-label">单元格内容</span>
+          <span class="input-wrap">
+            <svg class="icon input-icon"><use href="#icon-search"/></svg>
+            <input id="cell-input" type="text" placeholder="单元格内容" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+          </span>
+        </label>
+      </div>
+      <div class="search-controls">
+        <div class="control-group">
+          <span class="field-label">匹配方式</span>
+          <div id="match-dropdown" class="dropdown-slot"></div>
+        </div>
+        <div class="control-group">
+          <span class="field-label">排序</span>
+          <div id="sort-dropdown" class="dropdown-slot"></div>
+        </div>
+        <div class="segmented" id="view-segmented">
+          <button class="segmented-btn active" data-view="grouped">分组</button>
+          <button class="segmented-btn" data-view="flat">列表</button>
+        </div>
+        <div class="index-stats" id="index-stats">0 文件 · 0 子表 · 0 已深度索引</div>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <section class="results-panel">
+        <div class="panel-head">
+          <div class="panel-title">
+            <span>搜索结果</span>
+            <span id="result-summary" class="muted">0 个文件 / 0 个子表</span>
+          </div>
+          <button id="export-btn" class="btn btn-ghost">
+            <svg class="icon"><use href="#icon-download"/></svg>
+            <span>导出 CSV</span>
+          </button>
+        </div>
+        <div class="result-grid">
+          <div class="result-grid-header">
+            <div class="col name">文件 / 子表</div>
+            <div class="col count">命中子表</div>
+            <div class="col alias">别名</div>
+            <div class="col path">路径</div>
+          </div>
+          <div id="results-body" class="result-grid-body"></div>
+        </div>
+      </section>
+
+      <section class="preview-panel">
+        <div class="panel-head">
+          <button id="toggle-preview-btn" class="btn btn-icon" title="折叠/展开预览">
+            <svg class="icon"><use href="#icon-chevron"/></svg>
+          </button>
+          <div id="preview-title" class="preview-title">预览</div>
+          <div class="preview-actions">
+            <span class="input-wrap compact">
+              <svg class="icon input-icon"><use href="#icon-search"/></svg>
+              <input id="preview-input" type="text" placeholder="预览内搜索" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" disabled>
+            </span>
+            <button id="preview-prev-btn" class="btn" disabled>上一个</button>
+            <button id="preview-next-btn" class="btn" disabled>下一个</button>
+            <span id="hit-label" class="muted">命中 0</span>
+            <button id="open-btn" class="btn btn-icon" title="打开文件" disabled>
+              <svg class="icon"><use href="#icon-file"/></svg>
+            </button>
+            <button id="locate-btn" class="btn btn-icon" title="在文件管理器中定位" disabled>
+              <svg class="icon"><use href="#icon-pin"/></svg>
+            </button>
+            <button id="copy-btn" class="btn btn-icon" title="复制路径" disabled>
+              <svg class="icon"><use href="#icon-copy"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="preview-scroll" class="preview-scroll">
+          <div id="preview-empty" class="empty-state">选择一个子表后在这里查看预览</div>
+          <table id="preview-table" class="preview-table" hidden></table>
+        </div>
+      </section>
+    </main>
+
+    <footer id="statusbar" class="statusbar">
+      <span id="status-text">就绪</span>
+      <div id="job-progress" class="job-progress" hidden>
+        <div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>
+        <span id="progress-text" class="muted"></span>
+      </div>
+    </footer>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

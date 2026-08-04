@@ -36,6 +36,26 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Build Web UI
+        shell: bash
+        working-directory: webui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Linux WebKit dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgirepository1.0-dev gir1.2-gtk-3.0 gir1.2-webkit2-4.1
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -58,7 +78,9 @@ jobs:
           pyinstaller --onefile --windowed --name ${{ matrix.exe_name }} \
             --icon "$ICON_FILE" \
             --add-data "icons/app_icon.png${SEP}icons" \
+            --add-data "webui/dist${SEP}webui/dist" \
             --add-data "app.yml${SEP}." \
+            --collect-all webview \
             main.py
 
       - name: Create artifact

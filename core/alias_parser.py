@@ -85,9 +85,13 @@ def parse_sheet_alias_file(file_path: str) -> List[Tuple[str, str]]:
 
     以 #、::、REM 开头的行为注释。
     """
+    return parse_sheet_alias_text(_read_text_with_fallbacks(file_path))
+
+
+def parse_sheet_alias_text(content: str) -> List[Tuple[str, str]]:
+    """从字符串解析映射，返回 (alias_name, sheet_name) 列表。"""
     mappings = []
 
-    content = _read_text_with_fallbacks(file_path)
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line or _is_comment(line):

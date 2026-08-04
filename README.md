@@ -40,12 +40,21 @@ Excel 配置表搜索工具 — 面向游戏策划，快速定位 xlsx/xls 文�
 
 ```bash
 pip install -r requirements.txt
+cd webui && npm install && npm run build && cd ..
 ```
 
 ## 使用方法
 
 ```bash
 python main.py
+```
+
+### Web 界面模式
+
+桌面客户端顶部有 **Web 界面** 按钮，点击后会在系统浏览器中打开同一个界面，方便分享给不想安装客户端的用户。也可以直接运行：
+
+```bash
+python -m webui.web
 ```
 
 ### 操作流程
@@ -94,12 +103,16 @@ XlsxSearcher/
 ├── app.yml              # 应用配置（版本号、数据目录等）
 ├── requirements.txt     # 依赖
 ├── icons/               # 应用图标
+├── web/
+│   └── server.py        # 本地 HTTP API 服务
+├── webui/
+│   ├── desktop.py       # PyWebView 桌面客户端壳
+│   ├── src/             # TypeScript 前端源码
+│   └── dist/            # 构建后的前端静态文件
 ├── core/
 │   ├── indexer.py       # SQLite 索引管理
 │   ├── scanner.py       # xlsx/xls 文件扫描
 │   └── searcher.py      # 搜索逻辑
-├── gui/
-│   └── app.py           # PyQt5 主界面
 └── utils/
     └── file_utils.py    # 文件操作工具
 ```
@@ -112,7 +125,9 @@ XlsxSearcher/
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "webui/dist:webui/dist" \
   --add-data "app.yml:." \
+  --collect-all webview \
   main.py
 ```
 
@@ -124,7 +139,9 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
+  --add-data "webui/dist;webui/dist" \
   --add-data "app.yml;." \
+  --collect-all webview \
   main.py
 ```
 
@@ -136,7 +153,9 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "webui/dist:webui/dist" \
   --add-data "app.yml:." \
+  --collect-all webview \
   main.py
 ```
 

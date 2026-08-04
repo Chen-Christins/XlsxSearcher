@@ -40,12 +40,21 @@ Excel Config Table Search Tool — Quickly locate sheets and cell data in xlsx/x
 
 ```bash
 pip install -r requirements.txt
+cd webui && npm install && npm run build && cd ..
 ```
 
 ## Usage
 
 ```bash
 python main.py
+```
+
+### Web Interface Mode
+
+The desktop client has a **Web UI** button in the top bar that opens the same interface in the system browser. You can also run it directly in a browser:
+
+```bash
+python -m webui.web
 ```
 
 ### Workflow
@@ -94,12 +103,16 @@ XlsxSearcher/
 ├── app.yml              # App config (version, data dir, etc.)
 ├── requirements.txt     # Dependencies
 ├── icons/               # App icons
+├── web/
+│   └── server.py        # Local HTTP API server
+├── webui/
+│   ├── desktop.py       # PyWebView desktop shell
+│   ├── src/             # TypeScript frontend source
+│   └── dist/            # Built frontend static files
 ├── core/
 │   ├── indexer.py       # SQLite index management
 │   ├── scanner.py       # xlsx/xls file scanning
 │   └── searcher.py      # Search logic
-├── gui/
-│   └── app.py           # PyQt5 main UI
 └── utils/
     └── file_utils.py    # File operation utilities
 ```
@@ -112,7 +125,9 @@ XlsxSearcher/
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "webui/dist:webui/dist" \
   --add-data "app.yml:." \
+  --collect-all webview \
   main.py
 ```
 
@@ -124,7 +139,9 @@ The generated `.app` is in the `dist` directory. Extract and double-click to run
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
+  --add-data "webui/dist;webui/dist" \
   --add-data "app.yml;." \
+  --collect-all webview \
   main.py
 ```
 
@@ -136,7 +153,9 @@ The generated `.exe` is in the `dist` directory.
 pyinstaller --onefile --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
+  --add-data "webui/dist:webui/dist" \
   --add-data "app.yml:." \
+  --collect-all webview \
   main.py
 ```
 
