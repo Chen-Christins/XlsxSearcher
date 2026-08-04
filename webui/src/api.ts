@@ -103,3 +103,30 @@ export function buildSearchQuery(params: {
   });
   return `/api/search?${query.toString()}`;
 }
+
+export interface ChooseResult {
+  path: string | null;
+}
+
+export async function chooseDirectory(): Promise<string | null> {
+  const result = await apiPost<ChooseResult>("/api/choose-directory", {});
+  return result.path;
+}
+
+export async function chooseAliasFile(): Promise<string | null> {
+  const result = await apiPost<ChooseResult>("/api/choose-alias-file", {});
+  return result.path;
+}
+
+export async function chooseExportFile(): Promise<string | null> {
+  const result = await apiPost<ChooseResult>("/api/choose-export-file", {});
+  return result.path;
+}
+
+export async function openBrowser(url: string): Promise<void> {
+  await apiPost("/api/open-browser", { url });
+}
+
+export async function windowAction(action: "minimize" | "maximize" | "close"): Promise<void> {
+  await apiPost("/api/window-action", { action });
+}

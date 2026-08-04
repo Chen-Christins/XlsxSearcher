@@ -3,8 +3,6 @@ app:
   name: XlsxSearcher
   # 应用版本号，打包/发布时修改此处即可
   version: "1.4.4"
-  # 图标路径，相对于应用根目录
-  icon: icons/app_icon.png
-  # 数据存储目录，存放 index.db 和 app.log
+  # 数据存储目录，存放 index.db 和 webui_state.json
   # 支持 ~ 开头的用户目录写法
   data_dir: ~/.local/XlsxSearcher

@@ -2,6 +2,11 @@ import {
   apiGet,
   apiPost,
   buildSearchQuery,
+  chooseAliasFile,
+  chooseDirectory,
+  chooseExportFile,
+  openBrowser,
+  windowAction,
   type AppStatePayload,
   type Hit,
   type PreviewResponse,
@@ -11,15 +16,16 @@ import {
 
 declare global {
   interface Window {
-    pywebview?: {
-      api?: {
-        choose_directory?: () => Promise<string | null>;
-        choose_alias_file?: () => Promise<string | null>;
-        choose_export_file?: () => Promise<string | null>;
-        open_web_ui?: () => Promise<boolean>;
-      };
-    };
+    __TAURI_INTERNALS__?: unknown;
   }
+}
+
+function isTauri(): boolean {
+  return typeof window.__TAURI_INTERNALS__ !== "undefined";
+}
+
+function isMacOS(): boolean {
+  return /Mac/i.test(navigator.userAgent);
 }
 
 const ROW_HEIGHT = 38;
@@ -651,10 +657,9 @@ async function startScan(directory: string) {
 }
 
 async function pickDirectory() {
-  const bridge = window.pywebview?.api;
-  if (bridge?.choose_directory) {
+  if (isTauri()) {
     try {
-      const directory = await bridge.choose_directory();
+      const directory = await chooseDirectory();
       if (directory) await startScan(directory);
     } catch (error) {
       toast(`选择目录失败：${messageOf(error)}`, "error");
@@ -716,10 +721,9 @@ async function readFileText(file: File): Promise<string> {
 }
 
 async function importAliases() {
-  const bridge = window.pywebview?.api;
-  if (bridge?.choose_alias_file) {
+  if (isTauri()) {
     try {
-      const path = await bridge.choose_alias_file();
+      const path = await chooseAliasFile();
       if (!path) return;
       const response = await apiPost<{ imported: number }>(
         "/api/import-aliases-file",
@@ -795,10 +799,9 @@ function downloadCsv() {
 }
 
 async function exportResults() {
-  const bridge = window.pywebview?.api;
-  if (bridge?.choose_export_file) {
+  if (isTauri()) {
     try {
-      const path = await bridge.choose_export_file();
+      const path = await chooseExportFile();
       if (!path) return;
       const params = currentSearchParams();
       await apiPost("/api/export", { path, ...params });
@@ -808,6 +811,7 @@ async function exportResults() {
     }
     return;
   }
+
   downloadCsv();
   toast("已导出 CSV", "success");
 }
@@ -829,16 +833,16 @@ async function runAction(action: "open" | "locate" | "copy") {
 }
 
 async function openWebUi() {
-  const bridge = window.pywebview?.api;
-  if (bridge?.open_web_ui) {
+  if (isTauri()) {
     try {
-      await bridge.open_web_ui();
+      await openBrowser(location.origin);
       toast("已在系统浏览器打开 Web 界面", "success");
     } catch (error) {
       toast(`打开 Web 界面失败：${messageOf(error)}`, "error");
     }
     return;
   }
+
   window.open(location.origin, "_blank");
 }
 
@@ -886,7 +890,29 @@ function handleRowClick(indexText: string) {
   }
 }
 
+function setupTitlebar() {
+  if (!isTauri()) return;
+  const titlebar = element<HTMLElement>("titlebar");
+  titlebar.hidden = false;
+
+  if (isMacOS()) {
+    document.body.classList.add("platform-macos");
+    return;
+  }
+
+  element<HTMLButtonElement>("win-min-btn").addEventListener("click", () => {
+    void windowAction("minimize").catch(() => {});
+  });
+  element<HTMLButtonElement>("win-max-btn").addEventListener("click", () => {
+    void windowAction("maximize").catch(() => {});
+  });
+  element<HTMLButtonElement>("win-close-btn").addEventListener("click", () => {
+    void windowAction("close").catch(() => {});
+  });
+}
+
 function init() {
+  setupTitlebar();
   matchDropdown = createDropdown(
     "match-dropdown",
     [

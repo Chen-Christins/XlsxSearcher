@@ -5,17 +5,22 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- **Web 技术栈桌面客户端**：新增 PyWebView 桌面壳 + TypeScript 前端，扫描、搜索、深度索引、预览和原生文件操作继续复用现有 Python core；新增 `webui/` 前端工程和本地 API 服务
-- **流水线支持 Web UI 构建**：CI 增加 Node 构建步骤，PyInstaller 打包时携带 `webui/dist` 和 pywebview 运行时
-- **Web 界面模式**：桌面客户端顶部新增「Web 界面」按钮，可在系统浏览器中打开同一界面；也可用 `python -m webui.web` 直接以浏览器模式运行
+- **Tauri 桌面客户端（Rust）**：新增 `src-tauri/` 原生客户端，内嵌本地 axum HTTP 服务并嵌入 `webui/dist` 静态资源，取代 PyWebView 桌面壳成为发布形态
+- **无边框窗口标题栏**：macOS 使用 `TitleBarStyle::Overlay` 保留原生红绿灯（最小化/最大化/关闭）并悬浮在内容上；Windows/Linux 为无边框窗口，顶部新增可拖拽标题栏与最小化/最大化/关闭按钮（通过 `/api/window-action` 桥接）
+- **原生能力 HTTP 桥接**：前端选择目录 / 映射文件 / 导出路径改走 `/api/choose-directory`、`/api/choose-alias-file`、`/api/choose-export-file`，并新增 `/api/open-browser` 在系统浏览器打开 Web 界面
+- **打包发布**：`tauri.conf.json` 配置打包图标、dmg/nsis/deb/appimage 目标；CI 迁移为 Tauri 构建（macOS universal、Windows nsis、Ubuntu deb/appimage）
+- **根工程 `package.json`**：提供 `npm run tauri` 脚本与 `@tauri-apps/cli` 依赖
+
+### Changed
+- `webui/src/app.ts` 原生操作按 Tauri → Web 降级链调用（浏览器模式下用文件选择 / 下载 / `window.open` 兜底）
+- 版本号展示来源：`app.yml` 缺失时回退到 `CARGO_PKG_VERSION`
 
 ### Removed
-- 删除旧版 PyQt5 界面 `gui/app.py` 及其依赖，`main.py` 现在只启动 Web 技术栈桌面客户端
+- **删除旧 Python 后端**：移除 `main.py`、`requirements.txt`、`core/`、`web/`、`utils/`、`benchmarks/`、`webui/desktop.py`（PyWebView 桌面壳）与 `webui/web.py`（浏览器模式），并清理前端 `pywebview` 桥接代码；Web 界面仍可通过 Tauri 内置的「Web 界面」按钮在系统浏览器打开
 
 ### Fixed
-- 修复预览面板占位提示在选中子表后仍显示的问题
-- 恢复 `Ctrl+`` / `Cmd+`` 一键折叠/展开预览栏
-- 折叠预览栏时同步收回高度，结果列表占满剩余空间
+- 适配 calamine 0.26 API（`DataType` 变更为 trait，`Data` 枚举；`worksheet_range` 不再返回 `Option`）
+- 深度索引并行提取时 sheet id 绑定顺序错误
 
 ## [1.4.4] - 2026-07-14
 

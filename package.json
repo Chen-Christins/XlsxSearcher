@@ -1,0 +1,12 @@
+{
+  "name": "xlsxsearcher",
+  "version": "1.4.4",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "build:webui": "npm --prefix webui run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

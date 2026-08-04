@@ -1,0 +1,32 @@
+[package]
+name = "xlsxsearcher"
+version = "1.4.4"
+edition = "2021"
+description = "Excel sheet search desktop client"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+arboard = "3.4"
+axum = "0.7"
+calamine = "0.26"
+dirs = "5"
+encoding_rs = "0.8"
+include_dir = "0.7"
+indexmap = "2.6"
+open = "5.3"
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+rayon = "1.10"
+regex = "1.11"
+rfd = "0.15"
+rusqlite = { version = "0.32", features = ["bundled-full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+walkdir = "2.5"
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -33,29 +33,29 @@ Excel 配置表搜索工具 — 面向游戏策划，快速定位 xlsx/xls 文�
 
 ## 环境要求
 
-- Python 3.8+
 - macOS / Windows / Linux
+- Node.js 18+（构建 Web UI）、Rust stable（构建桌面壳）
 
 ### 依赖安装
 
 ```bash
-pip install -r requirements.txt
+# 安装根目录依赖（含 @tauri-apps/cli）
+npm install
+# 安装并构建 Web UI
 cd webui && npm install && npm run build && cd ..
 ```
 
 ## 使用方法
 
+### 桌面客户端
+
 ```bash
-python main.py
+npm run tauri -- dev
 ```
 
 ### Web 界面模式
 
-桌面客户端顶部有 **Web 界面** 按钮，点击后会在系统浏览器中打开同一个界面，方便分享给不想安装客户端的用户。也可以直接运行：
-
-```bash
-python -m webui.web
-```
+桌面客户端顶部有 **Web 界面** 按钮，点击后会在系统浏览器中打开同一个界面，方便分享给不想安装客户端的用户。
 
 ### 操作流程
 
@@ -99,67 +99,49 @@ python -m webui.web
 
 ```
 XlsxSearcher/
-├── main.py              # 程序入口
+├── package.json         # 根工程配置（tauri 脚本、@tauri-apps/cli）
 ├── app.yml              # 应用配置（版本号、数据目录等）
-├── requirements.txt     # 依赖
-├── icons/               # 应用图标
-├── web/
-│   └── server.py        # 本地 HTTP API 服务
-├── webui/
-│   ├── desktop.py       # PyWebView 桌面客户端壳
-│   ├── src/             # TypeScript 前端源码
-│   └── dist/            # 构建后的前端静态文件
-├── core/
-│   ├── indexer.py       # SQLite 索引管理
-│   ├── scanner.py       # xlsx/xls 文件扫描
-│   └── searcher.py      # 搜索逻辑
-└── utils/
-    └── file_utils.py    # 文件操作工具
+├── src-tauri/           # Tauri 桌面客户端（Rust）
+│   ├── src/
+│   │   ├── main.rs      # 入口：启动本地 HTTP 服务 + webview（macOS 原生红绿灯）
+│   │   ├── server.rs    # 本地 HTTP API + 内嵌前端静态资源
+│   │   ├── db.rs        # SQLite 索引管理（FTS5）
+│   │   └── scanner.rs   # xlsx/xlsm/xls 扫描与单元格读取
+│   └── tauri.conf.json  # Tauri 配置（打包、图标、版本）
+└── webui/
+    ├── src/             # TypeScript 前端源码
+    └── dist/            # 构建后的前端静态文件
 ```
 
 ## 打包发布
 
+构建前需先安装依赖并构建 Web UI（`npm install` + `cd webui && npm install && npm run build`）。
+
 ### macOS
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.png \
-  --add-data "icons/app_icon.png:icons" \
-  --add-data "webui/dist:webui/dist" \
-  --add-data "app.yml:." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles app,dmg
 ```
 
-生成的 `.app` 在 `dist` 目录下，解压后双击运行。
+生成的 `.app` / `.dmg` 在 `src-tauri/target/release/bundle/` 目录下。
 
 ### Windows
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.ico \
-  --add-data "icons/app_icon.png;icons" \
-  --add-data "webui/dist;webui/dist" \
-  --add-data "app.yml;." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles nsis
 ```
 
-生成的 `.exe` 在 `dist` 目录下。
+生成的安装包在 `src-tauri/target/release/bundle/nsis/` 目录下。
 
 ### Linux
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.png \
-  --add-data "icons/app_icon.png:icons" \
-  --add-data "webui/dist:webui/dist" \
-  --add-data "app.yml:." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles deb,appimage
 ```
 
-生成的可执行文件在 `dist` 目录下。
+生成的安装包在 `src-tauri/target/release/bundle/` 目录下。
+
+CI 会分别在 macOS、Windows、Ubuntu 上自动构建上述产物，发布到 GitHub Release（见 `.github/workflows/build.yml`）。
 
 ## 配置
 
@@ -169,18 +151,18 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 # XlsxSearcher 应用配置
 app:
   name: XlsxSearcher
-  version: "1.4.3"          # 版本号，发布时修改此处
-  icon: icons/app_icon.png   # 运行时窗口图标
-  data_dir: ~/.local/XlsxSearcher  # 数据库和日志存放目录
+  version: "1.4.4"          # 版本号，发布时修改此处
+  data_dir: ~/.local/XlsxSearcher  # 数据库和最近扫描目录存放位置
 ```
+
+> Tauri 壳运行时从 `app.yml` 读取版本号用于界面展示；打包版本号来自 `src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json`，发布时请保持三处一致。`data_dir` 与 `src-tauri/tauri.conf.json` 的 `bundle.identifier` 共同决定索引数据库的存放位置。
 
 ## 数据存储
 
-索引数据库和日志默认保存在 `app.yml` 中 `data_dir` 指定的目录下：
+索引数据库默认保存在 `app.yml` 中 `data_dir` 指定的目录下：
 
 - **索引数据库**: `~/.local/XlsxSearcher/index.db`
-- **应用日志**: `~/.local/XlsxSearcher/app.log`
-- **本地偏好**: 通过 `QSettings` 存储（macOS: `~/Library/Preferences/`）
+- **最近扫描目录**: `~/.local/XlsxSearcher/webui_state.json`
 
 ## 许可证
 

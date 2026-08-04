@@ -26,6 +26,8 @@ html, body {
 }
 
 body {
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC",
@@ -33,6 +35,65 @@ body {
   font-size: 13px;
   letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
+}
+
+.titlebar {
+  -webkit-app-region: drag;
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.titlebar[hidden] {
+  display: none;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.platform-macos .titlebar-title {
+  margin-left: 76px;
+}
+
+.platform-macos .titlebar-controls {
+  display: none;
+}
+
+.titlebar-controls {
+  -webkit-app-region: no-drag;
+  display: flex;
+  height: 100%;
+}
+
+.titlebar-btn {
+  -webkit-app-region: no-drag;
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: default;
+  padding: 0;
+}
+
+.titlebar-btn:hover {
+  background: rgba(16, 24, 40, 0.07);
+  color: var(--text);
+}
+
+.titlebar-close:hover {
+  background: var(--danger);
+  color: #fff;
 }
 
 button {
@@ -59,7 +120,8 @@ input {
 }
 
 #app {
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 10px;

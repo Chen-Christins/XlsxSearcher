@@ -33,28 +33,29 @@ Excel Config Table Search Tool — Quickly locate sheets and cell data in xlsx/x
 
 ## Requirements
 
-- Python 3.8+
 - macOS / Windows / Linux
+- Node.js 18+ (builds the Web UI), Rust stable (builds the desktop shell)
 
 ### Install Dependencies
 
 ```bash
-pip install -r requirements.txt
+# Install root deps (includes @tauri-apps/cli)
+npm install
+# Install and build the Web UI
 cd webui && npm install && npm run build && cd ..
 ```
 
 ## Usage
 
+### Desktop client
+
 ```bash
-python main.py
+npm run tauri -- dev
 ```
 
 ### Web Interface Mode
 
-The desktop client has a **Web UI** button in the top bar that opens the same interface in the system browser. You can also run it directly in a browser:
-
-```bash
-python -m webui.web
+The desktop client has a **Web UI** button in the top bar that opens the same interface in the system browser.
 ```
 
 ### Workflow
@@ -99,88 +100,70 @@ Other features:
 
 ```
 XlsxSearcher/
-├── main.py              # Entry point
+├── package.json         # Root config (tauri script, @tauri-apps/cli)
 ├── app.yml              # App config (version, data dir, etc.)
-├── requirements.txt     # Dependencies
-├── icons/               # App icons
-├── web/
-│   └── server.py        # Local HTTP API server
-├── webui/
-│   ├── desktop.py       # PyWebView desktop shell
-│   ├── src/             # TypeScript frontend source
-│   └── dist/            # Built frontend static files
-├── core/
-│   ├── indexer.py       # SQLite index management
-│   ├── scanner.py       # xlsx/xls file scanning
-│   └── searcher.py      # Search logic
-└── utils/
-    └── file_utils.py    # File operation utilities
+├── src-tauri/           # Tauri desktop client (Rust)
+│   ├── src/
+│   │   ├── main.rs      # Entry: local HTTP server + webview (native macOS traffic lights)
+│   │   ├── server.rs    # Local HTTP API + embedded frontend assets
+│   │   ├── db.rs        # SQLite index management (FTS5)
+│   │   └── scanner.rs   # xlsx/xlsm/xls scanning & cell reading
+│   └── tauri.conf.json  # Tauri config (bundling, icons, version)
+└── webui/
+    ├── src/             # TypeScript frontend source
+    └── dist/            # Built frontend static files
 ```
 
 ## Build & Distribute
 
+Install dependencies and build the Web UI first (`npm install` + `cd webui && npm install && npm run build`).
+
 ### macOS
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.png \
-  --add-data "icons/app_icon.png:icons" \
-  --add-data "webui/dist:webui/dist" \
-  --add-data "app.yml:." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles app,dmg
 ```
 
-The generated `.app` is in the `dist` directory. Extract and double-click to run.
+The generated `.app` / `.dmg` is in `src-tauri/target/release/bundle/`.
 
 ### Windows
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.ico \
-  --add-data "icons/app_icon.png;icons" \
-  --add-data "webui/dist;webui/dist" \
-  --add-data "app.yml;." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles nsis
 ```
 
-The generated `.exe` is in the `dist` directory.
+The generated installer is in `src-tauri/target/release/bundle/nsis/`.
 
 ### Linux
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
-  --icon icons/app_icon.png \
-  --add-data "icons/app_icon.png:icons" \
-  --add-data "webui/dist:webui/dist" \
-  --add-data "app.yml:." \
-  --collect-all webview \
-  main.py
+npm run tauri -- build --bundles deb,appimage
 ```
 
-The generated executable is in the `dist` directory.
+The generated packages are in `src-tauri/target/release/bundle/`.
+
+CI builds all of the above automatically on macOS, Windows, and Ubuntu and publishes them to GitHub Releases (see `.github/workflows/build.yml`).
 
 ## Configuration
 
-Application config `app.yml` is located at the project root. You can customize version, icon path, and data directory:
+Application config `app.yml` is located at the project root. You can customize version and data directory:
 
 ```yaml
 # XlsxSearcher application configuration
 app:
   name: XlsxSearcher
-  version: "1.4.3"          # App version, update here before release
-  icon: icons/app_icon.png   # Runtime window icon
-  data_dir: ~/.local/XlsxSearcher  # Database and log directory
+  version: "1.4.4"          # App version, update here before release
+  data_dir: ~/.local/XlsxSearcher  # Index DB and last-scanned directory location
 ```
+
+> The Tauri shell reads the version from `app.yml` for display; the packaged version comes from `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`. Keep all three in sync when releasing.
 
 ## Data Storage
 
-Index database and logs are stored under the `data_dir` path configured in `app.yml`:
+Index database is stored under the `data_dir` path configured in `app.yml`:
 
 - **Index Database**: `~/.local/XlsxSearcher/index.db`
-- **Application Log**: `~/.local/XlsxSearcher/app.log`
-- **Preferences**: Stored via `QSettings` (macOS: `~/Library/Preferences/`)
+- **Last Scanned Directory**: `~/.local/XlsxSearcher/webui_state.json`
 
 ## License
 
