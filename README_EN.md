@@ -19,6 +19,7 @@ Excel Config Table Search Tool — Quickly locate sheets and cell data in xlsx/x
 - 📈 **Result Statistics**: Status bar shows real-time count of matching files and sheets
 - 🧾 **Index Status**: Displays scanned file count, sheet count, deep index coverage, and pending count
 - 🏷️ **Alias Mapping**: Import mapping files to search Chinese sheet names using English config names, and show each sheet's aliases in results
+- ⚙️ **Settings**: Gear button switches theme (System / Light / Dark; System follows the OS live) and toggles the "Alias" column; settings are persisted
 - 🕘 **Recent Searches**: Save the last 15 search combinations, one-click restore
 - 📂 **Open File**: Double-click or use button to open file directly in Excel
 - 🎯 **Locate in Finder**: Reveal and select the file in Explorer/Finder
@@ -61,13 +62,12 @@ The desktop client has a **Web UI** button in the top bar that opens the same in
 ### Workflow
 
 1. Click **"Select Directory"** to choose a folder to scan
-2. The program auto-scans all `xlsx` / `xlsm` / `xls` files in the directory and builds an index
-3. Click **"Deep Index"** to extract cell contents from all sheets (one-time operation; subsequent incremental scans are unaffected)
-4. Enter keywords in the search box:
+2. The program auto-scans all `xlsx` / `xlsm` / `xls` files in the directory, builds an index, and auto-extracts cell contents from new files (automatic deep index), so **cell search works out of the box**; the **"Deep Index"** button can re-index manually, and unchanged re-scans skip it
+3. Enter keywords in the search box:
    - **Sheet Name**: Search by sheet name
    - **File Name**: Search by file name
    - **Cell Value**: Search by actual cell content
-5. Search options:
+4. Search options:
    - **Match Mode**: Fuzzy / Prefix / Exact
    - **Sort By**: File Name A-Z / File Name Z-A / Most Sheets / Fewest Sheets
    - **View**: Group View / List View

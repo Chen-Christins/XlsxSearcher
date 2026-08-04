@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -81,4 +81,23 @@ pub struct AppStateResponse {
     pub index: IndexStatus,
     pub aliases: AliasStats,
     pub job: JobState,
+    pub settings: Settings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Settings {
+    pub theme: String,
+    pub show_alias_column: bool,
+    #[serde(default)]
+    pub column_widths: Option<HashMap<String, f64>>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            theme: "system".to_string(),
+            show_alias_column: true,
+            column_widths: None,
+        }
+    }
 }

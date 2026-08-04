@@ -1,7 +1,5 @@
 use crate::db::{self, DbPool};
-use crate::types::{
-    AliasStats, AppStateResponse, IndexStatus, JobState,
-};
+use crate::types::{AliasStats, AppStateResponse, IndexStatus, JobState, Settings};
 use r2d2_sqlite::SqliteConnectionManager;
 use serde_json::Value;
 use std::fs;
@@ -13,6 +11,7 @@ pub struct AppState {
     pub fts_available: bool,
     pub version: String,
     pub directory: Mutex<String>,
+    pub settings: Mutex<Settings>,
     pub job: Mutex<JobState>,
     pub app_handle: Mutex<Option<tauri::AppHandle>>,
     pub state_file: PathBuf,
@@ -40,11 +39,13 @@ impl AppState {
         let fts_available = db::init_db(&pool);
 
         let directory = load_directory(&state_file);
+        let settings = load_settings(&state_file);
         Arc::new(Self {
             pool,
             fts_available,
             version: config.version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
             directory: Mutex::new(directory),
+            settings: Mutex::new(settings),
             job: Mutex::new(JobState::default()),
             app_handle: Mutex::new(None),
             state_file,
@@ -69,17 +70,27 @@ impl AppState {
             index,
             aliases,
             job,
+            settings: self.settings.lock().expect("settings lock").clone(),
         }
     }
 
     pub fn set_directory(&self, directory: String) {
         *self.directory.lock().expect("directory lock") = directory;
-        self.save_directory();
+        self.save_state();
     }
 
-    pub fn save_directory(&self) {
+    pub fn set_settings(&self, settings: Settings) {
+        *self.settings.lock().expect("settings lock") = settings;
+        self.save_state();
+    }
+
+    fn save_state(&self) {
         let directory = self.directory.lock().expect("directory lock").clone();
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({ "directory": directory })) {
+        let settings = self.settings.lock().expect("settings lock").clone();
+        if let Ok(json) = serde_json::to_string(&serde_json::json!({
+            "directory": directory,
+            "settings": settings,
+        })) {
             let _ = fs::write(&self.state_file, json);
         }
     }
@@ -157,5 +168,18 @@ fn load_directory(state_file: &PathBuf) -> String {
         .and_then(|v| v.as_str())
         .map(|v| v.to_string())
         .filter(|v| std::path::Path::new(v).is_dir())
+        .unwrap_or_default()
+}
+
+fn load_settings(state_file: &PathBuf) -> Settings {
+    let Ok(content) = fs::read_to_string(state_file) else {
+        return Settings::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Settings::default();
+    };
+    value
+        .get("settings")
+        .and_then(|v| serde_json::from_value::<Settings>(v.clone()).ok())
         .unwrap_or_default()
 }

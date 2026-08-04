@@ -186,6 +186,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/choose-export-file", post(choose_export_file_handler))
         .route("/api/window-action", post(window_action_handler))
         .route("/api/open-browser", post(open_browser_handler))
+        .route("/api/settings", post(settings_handler))
         .fallback(webui_fallback_handler)
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -327,11 +328,46 @@ fn scan_worker(state: SharedState, directory: String) {
 
     match result {
         Ok((added, updated, deleted)) => {
-            state.finish_job(
-                Some(json!({ "added": added, "updated": updated, "deleted": deleted })),
-                format!("扫描完成：新增 {}，更新 {}，删除 {}", added, updated, deleted),
-                None,
-            );
+            // Auto deep-index newly added/changed sheets so cell-content search
+            // works right after a scan without a manual "深度索引" step.
+            let pending = db::get_index_status(&state.pool)
+                .map(|s| s.pending_deep_index_count)
+                .unwrap_or(0);
+            if pending > 0 {
+                {
+                    let mut job = state.job.lock().expect("job lock");
+                    job.message = "扫描完成，正在深度索引...".to_string();
+                }
+                match deep_index_internal(state.clone()) {
+                    Ok((processed, errors)) => {
+                        let mut message = format!(
+                            "扫描完成：新增 {}，更新 {}，删除 {}",
+                            added, updated, deleted
+                        );
+                        if processed > 0 {
+                            message.push_str(&format!("；已深度索引 {} 个子表", processed));
+                        }
+                        state.finish_job(
+                            Some(json!({
+                                "added": added,
+                                "updated": updated,
+                                "deleted": deleted,
+                                "deep_indexed": processed,
+                                "errors": errors,
+                            })),
+                            message,
+                            None,
+                        );
+                    }
+                    Err(error) => state.finish_job(None, String::new(), Some(error)),
+                }
+            } else {
+                state.finish_job(
+                    Some(json!({ "added": added, "updated": updated, "deleted": deleted })),
+                    format!("扫描完成：新增 {}，更新 {}，删除 {}", added, updated, deleted),
+                    None,
+                );
+            }
         }
         Err(error) => state.finish_job(None, String::new(), Some(error)),
     }
@@ -360,54 +396,7 @@ async fn deep_index_handler(State(state): State<SharedState>) -> ApiResult {
 }
 
 fn deep_index_worker(state: SharedState) {
-    let result = (|| -> Result<(usize, usize), String> {
-        let pending = db::get_sheets_without_cell_text(&state.pool)?;
-        let total = pending.len();
-        if total == 0 {
-            return Ok((0, 0));
-        }
-        let mut by_file: HashMap<String, Vec<(i64, String)>> = HashMap::new();
-        for (sheet_id, sheet_name, filepath) in pending {
-            by_file.entry(filepath).or_default().push((sheet_id, sheet_name));
-        }
-
-        let files: Vec<(String, Vec<(i64, String)>)> = by_file.into_iter().collect();
-        let extracted: Vec<Result<(String, Vec<String>), String>> = files
-            .par_iter()
-            .map(|(filepath, entries)| {
-                let names: Vec<String> = entries.iter().map(|(_, name)| name.clone()).collect();
-                scanner::extract_cell_texts(filepath, &names, 20_000)
-                    .map(|texts| (filepath.clone(), texts))
-            })
-            .collect();
-
-        let mut processed = 0usize;
-        let mut errors = 0usize;
-        let mut updates: Vec<(String, i64)> = Vec::new();
-        for result in extracted {
-            match result {
-                Ok((filepath, texts)) => {
-                    let empty: Vec<(i64, String)> = Vec::new();
-                    let entries = files
-                        .iter()
-                        .find(|(path, _)| *path == filepath)
-                        .map(|(_, entries)| entries)
-                        .unwrap_or(&empty);
-                    for ((sheet_id, _), text) in entries.iter().zip(texts.iter()) {
-                        updates.push((text.clone(), *sheet_id));
-                    }
-                    processed += entries.len();
-                }
-                Err(_) => {
-                    errors += 1;
-                }
-            }
-        }
-        db::update_sheet_cell_texts_batch(&state.pool, &updates)?;
-        state.set_progress(processed, total);
-        Ok((processed, errors))
-    })();
-
+    let result = deep_index_internal(state.clone());
     match result {
         Ok((processed, errors)) => {
             let message = if processed == 0 {
@@ -419,6 +408,54 @@ fn deep_index_worker(state: SharedState) {
         }
         Err(error) => state.finish_job(None, String::new(), Some(error)),
     }
+}
+
+fn deep_index_internal(state: SharedState) -> Result<(usize, usize), String> {
+    let pending = db::get_sheets_without_cell_text(&state.pool)?;
+    let total = pending.len();
+    if total == 0 {
+        return Ok((0, 0));
+    }
+    let mut by_file: HashMap<String, Vec<(i64, String)>> = HashMap::new();
+    for (sheet_id, sheet_name, filepath) in pending {
+        by_file.entry(filepath).or_default().push((sheet_id, sheet_name));
+    }
+
+    let files: Vec<(String, Vec<(i64, String)>)> = by_file.into_iter().collect();
+    let extracted: Vec<Result<(String, Vec<String>), String>> = files
+        .par_iter()
+        .map(|(filepath, entries)| {
+            let names: Vec<String> = entries.iter().map(|(_, name)| name.clone()).collect();
+            scanner::extract_cell_texts(filepath, &names, 50_000_000)
+                .map(|texts| (filepath.clone(), texts))
+        })
+        .collect();
+
+    let mut processed = 0usize;
+    let mut errors = 0usize;
+    let mut updates: Vec<(String, i64)> = Vec::new();
+    for result in extracted {
+        match result {
+            Ok((filepath, texts)) => {
+                let empty: Vec<(i64, String)> = Vec::new();
+                let entries = files
+                    .iter()
+                    .find(|(path, _)| *path == filepath)
+                    .map(|(_, entries)| entries)
+                    .unwrap_or(&empty);
+                for ((sheet_id, _), text) in entries.iter().zip(texts.iter()) {
+                    updates.push((text.clone(), *sheet_id));
+                }
+                processed += entries.len();
+            }
+            Err(_) => {
+                errors += 1;
+            }
+        }
+    }
+    db::update_sheet_cell_texts_batch(&state.pool, &updates)?;
+    state.set_progress(processed, total);
+    Ok((processed, errors))
 }
 
 async fn clear_index_handler(State(state): State<SharedState>) -> ApiResult {
@@ -617,5 +654,13 @@ async fn open_browser_handler(Json(body): Json<OpenBrowserBody>) -> ApiResult {
         return Err(ApiError::bad_request("缺少 URL"));
     }
     open::that(&body.url).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn settings_handler(
+    State(state): State<SharedState>,
+    Json(settings): Json<crate::types::Settings>,
+) -> ApiResult {
+    state.set_settings(settings);
     Ok(Json(json!({ "ok": true })))
 }

@@ -42,7 +42,7 @@ webui/src               ← TypeScript UI source, compiled to webui/dist
 
 ### Threading model
 - **Scan job** — spawned on a `std::thread`; walks files with `walkdir`, sheet extraction parallelized with `rayon`; SQLite writes go through the r2d2 pool (`src-tauri/src/db.rs`).
-- **Deep index job** — `rayon` `par_iter` groups `cell_text IS NULL` sheets by file and extracts via `scanner::extract_cell_texts`; batch updates go through the r2d2 pool.
+- **Deep index job** — `rayon` `par_iter` groups `cell_text IS NULL` sheets by file and extracts via `scanner::extract_cell_texts`; batch updates go through the r2d2 pool. New/changed sheets are deep-indexed automatically right after a scan (`scan_worker` calls `deep_index_internal`), so cell search works without a manual "深度索引" step; unchanged re-scans skip it.
 - **Search / preview** — handled on axum request threads; the frontend owns request supersession via sequence counters.
 
 ### SQLite connections
@@ -53,7 +53,7 @@ webui/src               ← TypeScript UI source, compiled to webui/dist
 2. Sheet names are written to `~/.local/XlsxSearcher/index.db` (SQLite, WAL mode). The DB has three tables: `xlsx_files`, `sheets`, `sheet_aliases`.
 3. "Deep index" extracts cell text from every sheet via `scanner::extract_cell_texts` (calamine), stored in `sheets.cell_text`. Files >80MB are skipped.
 4. Searches query the SQLite index directly — results are grouped by file in `db::search`. Cell-content search (>=3-char keyword) uses the FTS5 trigram index (`sheets_fts MATCH`); shorter keywords fall back to `LIKE`.
-5. Sheet preview reads a 20-row × 50-col window via `scanner::read_sheet_with_hits()` on an axum request thread, with window positioning around hit cells.
+5. Sheet preview reads a 20-row × 50-col window via `scanner::read_sheet_with_hits()` on an axum request thread, with window positioning around hit cells. For xlsx/xlsm it streams the sheet XML with a byte-level scanner (no full-sheet materialization): it scans for hits in one pass (stopping at `max_hits`), then extracts only the window rows in a second pass (stopping once past the window). Falls back to calamine for `.xls` or unreadable files.
 
 ### Match modes
 Three modes, applied at the SQL query level for sheet-name/filename: `fuzzy` (`LIKE '%keyword%'`), `prefix` (`LIKE 'keyword%'`), `exact` (`= keyword`). All use `COLLATE NOCASE`. For cell-content search, FTS5 trigram handles the fuzzy (substring) case directly; `prefix`/`exact` FTS-narrow then apply the corresponding LIKE/`LOWER()=` post-filter to preserve semantics.
@@ -76,8 +76,9 @@ Comments are `#`, `::`, or `REM`. The parser tries encodings UTF-8-SIG → UTF-8
 - **Scanner**: uses `walkdir`, skips directories whose name starts with `.`. Files are sorted by full path before processing for better disk locality.
 - **Progress reporting**: job progress is polled by the frontend via `/api/state`.
 - **Upsert batch writes**: `db::upsert_files_batch()` preserves existing `cell_text` across re-scans by querying old values before the DELETE+INSERT cycle. When a file's sheet-name list is unchanged since the last scan, the sheets rows are NOT rebuilt — only `xlsx_files.modified_time` is updated, so deep-indexed `cell_text` is trivially retained.
-- **Combined file open**: `scanner::read_sheet_with_hits()` opens a file once and returns hits + preview data + header row simultaneously.
+- **Combined file open**: `scanner::read_sheet_with_hits()` opens a file once and returns hits + preview data + header row simultaneously. For xlsx/xlsm it uses a streaming byte scanner (`scan_sheet`/`scan_row_cells` in `src-tauri/src/scanner.rs`) that avoids materializing the whole sheet; `.xls` and failures fall back to the calamine path.
 - **Preview rendering**: `webui/src/app.ts` has `renderPreview()` that takes already-loaded data (no file I/O). The frontend calls the `/api/preview` endpoint; do NOT call `scanner::read_sheet_with_hits()` synchronously on the UI thread.
 - **Window chrome**: macOS uses `TitleBarStyle::Overlay` — the titlebar is transparent and the native red/yellow/green traffic lights stay overlaid on the content (our custom titlebar leaves left space for them and hides the custom buttons). Windows/Linux use `decorations(false)` with a fully custom titlebar (drag region via `-webkit-app-region`) with minimize/maximize/close buttons wired to `/api/window-action`. The custom titlebar is hidden outside Tauri.
 - **Version display**: `src-tauri/src/app_state.rs` reads `app.yml` for the version shown in the UI and falls back to `CARGO_PKG_VERSION`; `src-tauri/Cargo.toml` and `tauri.conf.json` must stay in sync at release time.
+- **Settings**: the top bar gear button opens a settings panel (theme System/Light/Dark, resolved to `data-theme` on `<html>`, plus the optional "Alias" column toggle). Settings persist via `POST /api/settings` into `webui_state.json` (`app_state.rs::set_settings`), and are served back through `/api/state`; `localStorage` is not used because the local server port changes every launch.
 - **Repo-ignored**: `build/`, `dist/`, `src-tauri/target/`, `node_modules`. Treat nothing in `src-tauri/target` as project source. Commit `src-tauri/Cargo.lock` and `package-lock.json` for reproducible builds.

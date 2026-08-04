@@ -97,14 +97,21 @@ fn init_fts(conn: &mut Connection) -> bool {
         "#,
     );
     if result.is_ok() {
-        // Rebuild the external-content FTS indexes so databases migrated from
-        // the older Python backend (where the FTS tables may already exist
-        // with stale "ghost" rows) are re-indexed correctly.
-        let _ = conn.execute("INSERT INTO sheets_fts(sheets_fts) VALUES('rebuild')", []);
-        let _ = conn.execute(
-            "INSERT INTO sheets_fts_names(sheets_fts_names) VALUES('rebuild')",
-            [],
-        );
+        // Rebuild the external-content FTS indexes only when migrating a
+        // database created by the older Python backend (which may contain stale
+        // "ghost" FTS rows). Fresh or already-migrated databases stay in sync
+        // via triggers, so we skip the (potentially expensive) rebuild.
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if user_version < 2 {
+            let _ = conn.execute("INSERT INTO sheets_fts(sheets_fts) VALUES('rebuild')", []);
+            let _ = conn.execute(
+                "INSERT INTO sheets_fts_names(sheets_fts_names) VALUES('rebuild')",
+                [],
+            );
+            let _ = conn.execute("PRAGMA user_version = 2", []);
+        }
         return true;
     }
 

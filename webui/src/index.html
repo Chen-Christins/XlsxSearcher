@@ -37,6 +37,11 @@
       <path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
       <path d="M14 3v4h4M9 13h6M9 17h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
     </symbol>
+    <symbol id="icon-spreadsheet" viewBox="0 0 24 24">
+      <path d="M6 3h8l4 4v14H6V3Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M9 11h6M9 14.5h6M9 18h6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </symbol>
     <symbol id="icon-table" viewBox="0 0 24 24">
       <rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
       <path d="M3 9h18M9 9v11" fill="none" stroke="currentColor" stroke-width="2"/>
@@ -65,10 +70,13 @@
       <path d="M3 12h18" fill="none" stroke="currentColor" stroke-width="2"/>
       <path d="M12 3c3 3.5 3 14 0 18M12 3c-3 3.5-3 14 0 18" fill="none" stroke="currentColor" stroke-width="2"/>
     </symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/>
+      <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.01a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56h.01a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.01a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.56 1.03Z" fill="none" stroke="currentColor" stroke-width="2"/>
+    </symbol>
   </svg>
 
   <div id="titlebar" class="titlebar" hidden>
-    <span class="titlebar-title">XlsxSearcher</span>
     <div class="titlebar-controls">
       <button id="win-min-btn" class="titlebar-btn" type="button" title="最小化" aria-label="最小化">&#x2212;</button>
       <button id="win-max-btn" class="titlebar-btn" type="button" title="最大化" aria-label="最大化">&#x25A1;</button>
@@ -113,6 +121,27 @@
           <svg class="icon"><use href="#icon-trash"/></svg>
           <span>清空索引</span>
         </button>
+        <div class="settings-wrap">
+          <button id="settings-btn" class="btn btn-icon" title="设置">
+            <svg class="icon"><use href="#icon-settings"/></svg>
+          </button>
+          <div id="settings-panel" class="settings-panel" hidden>
+            <div class="settings-section">
+              <span class="settings-label">主题</span>
+              <div class="segmented" id="theme-segmented">
+                <button class="segmented-btn" type="button" data-theme-choice="system">系统</button>
+                <button class="segmented-btn" type="button" data-theme-choice="light">明亮</button>
+                <button class="segmented-btn" type="button" data-theme-choice="dark">暗黑</button>
+              </div>
+            </div>
+            <div class="settings-section">
+              <label class="settings-check">
+                <input type="checkbox" id="show-alias-col">
+                <span>显示「别名」列</span>
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
     </header>
 
@@ -169,14 +198,16 @@
             <span>导出 CSV</span>
           </button>
         </div>
-        <div class="result-grid">
-          <div class="result-grid-header">
-            <div class="col name">文件 / 子表</div>
-            <div class="col count">命中子表</div>
-            <div class="col alias">别名</div>
-            <div class="col path">路径</div>
+        <div class="result-grid" id="result-grid">
+          <div id="result-scroll" class="result-scroll">
+            <div class="result-grid-header">
+              <div class="col name" data-col="name">文件 / 子表<span class="col-resize-handle"></span></div>
+              <div class="col count" data-col="count">命中子表<span class="col-resize-handle"></span></div>
+              <div class="col alias" data-col="alias">别名<span class="col-resize-handle"></span></div>
+              <div class="col path" data-col="path">路径</div>
+            </div>
+            <div id="results-body" class="result-grid-body"></div>
           </div>
-          <div id="results-body" class="result-grid-body"></div>
         </div>
       </section>
 
@@ -222,6 +253,17 @@
   </div>
 
   <div id="toast-container" class="toast-container"></div>
+
+  <div id="confirm-overlay" class="confirm-overlay" hidden>
+    <div class="confirm-dialog" role="dialog" aria-modal="true">
+      <p id="confirm-message" class="confirm-message"></p>
+      <div class="confirm-actions">
+        <button id="confirm-cancel-btn" class="btn" type="button">取消</button>
+        <button id="confirm-ok-btn" class="btn btn-danger" type="button">确定</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="app.js"></script>
 </body>
 </html>

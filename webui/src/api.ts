@@ -26,6 +26,13 @@ export interface AppStatePayload {
   index: IndexStatus;
   aliases: AliasStats;
   job: JobState;
+  settings: Settings;
+}
+
+export interface Settings {
+  theme: "system" | "light" | "dark";
+  show_alias_column: boolean;
+  column_widths: Record<string, number> | null;
 }
 
 export interface SearchResult {
@@ -129,4 +136,8 @@ export async function openBrowser(url: string): Promise<void> {
 
 export async function windowAction(action: "minimize" | "maximize" | "close"): Promise<void> {
   await apiPost("/api/window-action", { action });
+}
+
+export async function saveSettings(settings: Settings): Promise<void> {
+  await apiPost("/api/settings", settings);
 }

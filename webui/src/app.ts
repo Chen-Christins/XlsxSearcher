@@ -6,12 +6,14 @@ import {
   chooseDirectory,
   chooseExportFile,
   openBrowser,
+  saveSettings,
   windowAction,
   type AppStatePayload,
   type Hit,
   type PreviewResponse,
   type SearchResponse,
   type SearchResult,
+  type Settings as ApiSettings,
 } from "./api.js";
 
 declare global {
@@ -26,6 +28,131 @@ function isTauri(): boolean {
 
 function isMacOS(): boolean {
   return /Mac/i.test(navigator.userAgent);
+}
+
+type ThemeChoice = "system" | "light" | "dark";
+
+interface Settings {
+  theme: ThemeChoice;
+  showAliasColumn: boolean;
+  columnWidths: Record<string, number> | null;
+}
+
+const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
+  name: 240,
+  count: 84,
+  alias: 150,
+  path: 260,
+};
+
+const MIN_COLUMN_WIDTH: Record<string, number> = {
+  name: 160,
+  count: 60,
+  alias: 80,
+  path: 120,
+};
+
+const settings: Settings = {
+  theme: "system",
+  showAliasColumn: true,
+  columnWidths: null,
+};
+let settingsLoaded = false;
+
+function persistSettings() {
+  void saveSettings({
+    theme: settings.theme,
+    show_alias_column: settings.showAliasColumn,
+    column_widths: settings.columnWidths,
+  }).catch(() => {});
+}
+
+function applyServerSettings(api: ApiSettings) {
+  settings.theme = api.theme ?? settings.theme;
+  settings.showAliasColumn = api.show_alias_column ?? settings.showAliasColumn;
+  settings.columnWidths = api.column_widths ?? null;
+  applyTheme();
+  applyColumns();
+  syncSettingsControls();
+}
+
+function applyTheme() {
+  const dark =
+    settings.theme === "dark" ||
+    (settings.theme === "system" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+}
+
+function applyColumns() {
+  element<HTMLElement>("result-grid").classList.toggle(
+    "hide-alias",
+    !settings.showAliasColumn,
+  );
+  applyGridTemplate();
+}
+
+function applyGridTemplate() {
+  const grid = element<HTMLElement>("result-grid");
+  if (!settings.columnWidths) {
+    grid.style.removeProperty("--cols");
+    return;
+  }
+  const widths = settings.columnWidths;
+  const cols = [widths.name, widths.count];
+  if (settings.showAliasColumn) cols.push(widths.alias);
+  cols.push(widths.path);
+  grid.style.setProperty("--cols", cols.map((w) => `${w}px`).join(" "));
+}
+
+function ensureColumnWidths() {
+  if (settings.columnWidths) return;
+  const header = document.querySelectorAll<HTMLElement>(
+    ".result-grid-header .col",
+  );
+  const widths: Record<string, number> = { ...DEFAULT_COLUMN_WIDTHS };
+  header.forEach((cell) => {
+    const key = cell.dataset.col;
+    if (!key) return;
+    const measured = Math.round(cell.getBoundingClientRect().width);
+    if (measured > 0) widths[key] = measured;
+  });
+  settings.columnWidths = widths;
+}
+
+function setupColumnResize() {
+  const handles = document.querySelectorAll<HTMLElement>(
+    ".result-grid-header .col-resize-handle",
+  );
+  handles.forEach((handle) => {
+    handle.addEventListener("mousedown", (event) => {
+      const cell = handle.closest<HTMLElement>(".col");
+      const key = cell?.dataset.col;
+      if (typeof key !== "string") return;
+      event.preventDefault();
+      ensureColumnWidths();
+      const widths = settings.columnWidths!;
+      const colKey: string = key;
+      const startX = event.clientX;
+      const startWidth = widths[colKey];
+
+      function onMove(ev: MouseEvent) {
+        const dx = ev.clientX - startX;
+        const min = MIN_COLUMN_WIDTH[colKey] ?? 60;
+        widths[colKey] = Math.max(min, startWidth + dx);
+        applyGridTemplate();
+      }
+      function onUp() {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        persistSettings();
+      }
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "col-resize";
+    });
+  });
 }
 
 const ROW_HEIGHT = 38;
@@ -193,6 +320,7 @@ interface UiState {
   previewHits: Hit[];
   previewIndex: number;
   polling: boolean;
+  pendingDeepIndex: number;
 }
 
 const ui: UiState = {
@@ -206,6 +334,7 @@ const ui: UiState = {
   previewHits: [],
   previewIndex: -1,
   polling: false,
+  pendingDeepIndex: 0,
 };
 
 let matchDropdown: DropdownHandle;
@@ -297,8 +426,9 @@ function rowDisplayName(row: Row): string {
 
 function renderResults() {
   ui.rows = buildRows();
+  const scroll = element<HTMLElement>("result-scroll");
   const body = element<HTMLElement>("results-body");
-  const previousScrollTop = body.scrollTop;
+  const previousScrollTop = scroll.scrollTop;
   body.replaceChildren();
 
   const total = ui.rows.length;
@@ -307,7 +437,7 @@ function renderResults() {
   spacer.style.height = `${total * ROW_HEIGHT}px`;
   body.appendChild(spacer);
 
-  const viewportHeight = body.clientHeight || 400;
+  const viewportHeight = scroll.clientHeight || 400;
   const start = Math.max(0, Math.floor(previousScrollTop / ROW_HEIGHT) - 4);
   const end = Math.min(
     total,
@@ -327,7 +457,7 @@ function renderResults() {
     const chevron = row.hasChildren
       ? `<svg class="row-chevron ${row.expanded ? "expanded" : ""}"><use href="#icon-chevron"/></svg>`
       : `<svg class="row-chevron placeholder"><use href="#icon-chevron"/></svg>`;
-    const icon = row.type === "file" ? "icon-file" : "icon-table";
+    const icon = row.type === "file" ? "icon-spreadsheet" : "icon-table";
     const paddingLeft = 12 + row.indent * 22;
 
     rowElement.innerHTML = `
@@ -343,7 +473,7 @@ function renderResults() {
     spacer.appendChild(rowElement);
   }
 
-  body.scrollTop = previousScrollTop;
+  scroll.scrollTop = previousScrollTop;
   element<HTMLElement>("result-summary").textContent =
     `${ui.results.length} 个文件 / ${ui.results.reduce(
       (sum, result) => sum + result.sheet_count,
@@ -385,6 +515,13 @@ async function runSearch() {
     if (ui.results.length > 0) {
       setStatus(
         `找到 ${response.total_files} 个文件，${response.total_sheets} 个子表`,
+      );
+    } else if (
+      currentSearchParams().cell !== "" &&
+      ui.pendingDeepIndex > 0
+    ) {
+      setStatus(
+        `没有匹配结果，还有 ${ui.pendingDeepIndex} 个子表未深度索引，请先点击「深度索引」`,
       );
     } else {
       setStatus("没有匹配结果");
@@ -577,6 +714,10 @@ function navigatePreview(step: number) {
 }
 
 function updateAppState(state: AppStatePayload) {
+  if (state.settings && !settingsLoaded) {
+    settingsLoaded = true;
+    applyServerSettings(state.settings);
+  }
   element<HTMLElement>("version-pill").textContent = `v${state.version}`;
   element<HTMLElement>("dir-path").textContent =
     state.directory || "未选择目录";
@@ -584,6 +725,7 @@ function updateAppState(state: AppStatePayload) {
   element<HTMLElement>("index-stats").textContent =
     `${state.index.file_count} 文件 · ${state.index.sheet_count} 子表 · ` +
     `${state.index.indexed_cell_sheet_count} 已深度索引`;
+  ui.pendingDeepIndex = state.index.pending_deep_index_count;
 
   const running = state.job.running;
   element<HTMLButtonElement>("scan-btn").disabled = running;
@@ -699,8 +841,40 @@ async function startDeepIndex() {
   }
 }
 
+function confirmDialog(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = element<HTMLElement>("confirm-overlay");
+    const ok = element<HTMLButtonElement>("confirm-ok-btn");
+    const cancel = element<HTMLButtonElement>("confirm-cancel-btn");
+    element<HTMLElement>("confirm-message").textContent = message;
+    overlay.hidden = false;
+    ok.focus();
+
+    function cleanup(result: boolean) {
+      overlay.hidden = true;
+      ok.removeEventListener("click", onOk);
+      cancel.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKeydown);
+      resolve(result);
+    }
+    function onOk() {
+      cleanup(true);
+    }
+    function onCancel() {
+      cleanup(false);
+    }
+    function onKeydown(event: KeyboardEvent) {
+      if (event.key === "Escape") cleanup(false);
+      if (event.key === "Enter") cleanup(true);
+    }
+    ok.addEventListener("click", onOk);
+    cancel.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKeydown);
+  });
+}
+
 async function clearIndex() {
-  if (!window.confirm("确定要清空所有索引数据吗？")) return;
+  if (!(await confirmDialog("确定要清空所有索引数据吗？"))) return;
   try {
     await apiPost("/api/clear-index", {});
     toast("索引已清空", "success");
@@ -895,6 +1069,11 @@ function setupTitlebar() {
   const titlebar = element<HTMLElement>("titlebar");
   titlebar.hidden = false;
 
+  titlebar.addEventListener("dblclick", (event) => {
+    if ((event.target as HTMLElement).closest(".titlebar-btn")) return;
+    void windowAction("maximize").catch(() => {});
+  });
+
   if (isMacOS()) {
     document.body.classList.add("platform-macos");
     return;
@@ -911,8 +1090,60 @@ function setupTitlebar() {
   });
 }
 
+function setupSettings() {
+  const panel = element<HTMLElement>("settings-panel");
+  element<HTMLButtonElement>("settings-btn").addEventListener("click", (event) => {
+    event.stopPropagation();
+    panel.hidden = !panel.hidden;
+  });
+  document.addEventListener("click", (event) => {
+    if (!panel.hidden && !(event.target as HTMLElement).closest(".settings-wrap")) {
+      panel.hidden = true;
+    }
+  });
+
+  const themeButtons = document.querySelectorAll<HTMLButtonElement>(
+    "#theme-segmented .segmented-btn",
+  );
+  themeButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      settings.theme = button.dataset.themeChoice as ThemeChoice;
+      syncSettingsControls();
+      applyTheme();
+      persistSettings();
+    });
+  });
+
+  const aliasCheck = element<HTMLInputElement>("show-alias-col");
+  aliasCheck.addEventListener("change", () => {
+    settings.showAliasColumn = aliasCheck.checked;
+    applyColumns();
+    persistSettings();
+  });
+
+  window
+    .matchMedia("(prefers-color-scheme: dark)")
+    .addEventListener("change", () => {
+      if (settings.theme === "system") applyTheme();
+    });
+}
+
+function syncSettingsControls() {
+  document
+    .querySelectorAll<HTMLButtonElement>("#theme-segmented .segmented-btn")
+    .forEach((button) => {
+      button.classList.toggle("active", button.dataset.themeChoice === settings.theme);
+    });
+  element<HTMLInputElement>("show-alias-col").checked = settings.showAliasColumn;
+}
+
 function init() {
   setupTitlebar();
+  applyTheme();
+  applyColumns();
+  syncSettingsControls();
+  setupSettings();
+  setupColumnResize();
   matchDropdown = createDropdown(
     "match-dropdown",
     [
@@ -1029,8 +1260,9 @@ function init() {
       if (row) void runAction("open");
     }
   });
-  resultsBody.addEventListener("scroll", () => {
-    const start = Math.floor(resultsBody.scrollTop / ROW_HEIGHT);
+  const resultScroll = element<HTMLElement>("result-scroll");
+  resultScroll.addEventListener("scroll", () => {
+    const start = Math.floor(resultScroll.scrollTop / ROW_HEIGHT);
     if (start !== renderedStartIndex) renderResults();
   });
 
