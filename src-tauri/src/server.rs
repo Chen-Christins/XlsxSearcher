@@ -152,6 +152,8 @@ pub struct ScanBody {
 pub struct ActionBody {
     pub action: String,
     pub filepath: String,
+    #[serde(default)]
+    pub sheet_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -544,7 +546,15 @@ async fn action_handler(
         return Err(ApiError::bad_request("缺少文件路径"));
     }
     match body.action.as_str() {
-        "open" => open::that(&body.filepath).map_err(|e| ApiError::internal(e.to_string()))?,
+        "open" => {
+            let sheet = body.sheet_name.filter(|s| !s.is_empty());
+            match sheet {
+                Some(sheet) => open_file_at_sheet(&body.filepath, &sheet)
+                    .map_err(ApiError::internal),
+                None => open::that(&body.filepath)
+                    .map_err(|e| ApiError::internal(e.to_string())),
+            }?;
+        }
         "locate" => locate_file(&body.filepath).map_err(|e| ApiError::internal(e.to_string()))?,
         "copy" => {
             let mut clipboard = arboard::Clipboard::new().map_err(|e| ApiError::internal(e.to_string()))?;
@@ -555,6 +565,76 @@ async fn action_handler(
         _ => return Err(ApiError::bad_request(format!("未知操作: {}", body.action))),
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+// Opens a workbook and activates the given worksheet in Microsoft Excel.
+// Falls back to the plain "open with default app" when Excel scripting is not
+// available (e.g. Excel not installed, or a non-macOS/non-Windows platform).
+fn open_file_at_sheet(filepath: &str, sheet_name: &str) -> Result<(), String> {
+    let result = open_file_at_sheet_excel(filepath, sheet_name);
+    if result.is_ok() {
+        return result;
+    }
+    open::that(filepath).map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn open_file_at_sheet_excel(filepath: &str, sheet_name: &str) -> Result<(), String> {
+    let script = format!(
+        "tell application \"Microsoft Excel\"\n\
+         \topen POSIX file \"{}\"\n\
+         \tactivate\n\
+         \tset active sheet to worksheet \"{}\" of workbook 1\n\
+         end tell",
+        escape_applescript(filepath),
+        escape_applescript(sheet_name),
+    );
+    let status = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Excel 未能定位到指定子表".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_file_at_sheet_excel(filepath: &str, sheet_name: &str) -> Result<(), String> {
+    let script = format!(
+        "$ErrorActionPreference='Stop'\n\
+         $excel = New-Object -ComObject Excel.Application\n\
+         $excel.Visible = $true\n\
+         $wb = $excel.Workbooks.Open('{}')\n\
+         $ws = $wb.Worksheets.Item('{}')\n\
+         $ws.Activate()\n\
+         $excel.Activate()\n",
+        filepath.replace('\'', "''"),
+        sheet_name.replace('\'', "''"),
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-Command")
+        .arg(&script)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Excel 未能定位到指定子表".to_string())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_file_at_sheet_excel(_filepath: &str, _sheet_name: &str) -> Result<(), String> {
+    Err("当前平台不支持定位子表".to_string())
+}
+
+fn escape_applescript(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn locate_file(filepath: &str) -> Result<(), String> {
@@ -745,6 +825,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     async fn router_with_web_interface(enabled: bool) -> Router {
@@ -849,5 +930,145 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert!(res.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().starts_with("text/css"));
+    }
+
+    // --- deep index regression tests ---------------------------------------
+
+    fn make_test_workbook(path: &std::path::Path) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).expect("create workbook");
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("[Content_Types].xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+        )
+        .unwrap();
+        zip.start_file("_rels/.rels", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+        )
+        .unwrap();
+        zip.start_file("xl/workbook.xml", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>
+<sheet name="SheetA" sheetId="1" r:id="rId1"/>
+<sheet name="SheetB" sheetId="2" r:id="rId2"/>
+</sheets>
+</workbook>"#,
+        )
+        .unwrap();
+        zip.start_file("xl/_rels/workbook.xml.rels", opts).unwrap();
+        zip.write_all(
+            br#"<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>
+</Relationships>"#,
+        )
+        .unwrap();
+        for (idx, rows) in [
+            vec![
+                vec![("A1", "apple"), ("B1", "banana"), ("C1", "orange")],
+                vec![("A2", "zhang"), ("B2", "100"), ("C2", "beijing")],
+            ],
+            vec![
+                vec![("A1", "header"), ("B1", "value")],
+                vec![("A2", "hello"), ("B2", "world")],
+            ],
+        ]
+        .iter()
+        .enumerate()
+        {
+            zip.start_file(format!("xl/worksheets/sheet{}.xml", idx + 1), opts).unwrap();
+            let mut xml = String::from(
+                r#"<?xml version="1.0"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+            );
+            for (row, cells) in rows.iter().enumerate() {
+                xml.push_str(&format!(r#"<row r="{}">"#, row + 1));
+                for (ref_, value) in cells {
+                    xml.push_str(&format!(
+                        r#"<c r="{}" t="inlineStr"><is><t>{}</t></is></c>"#,
+                        ref_, value
+                    ));
+                }
+                xml.push_str("</row>");
+            }
+            xml.push_str("</sheetData></worksheet>");
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn make_temp_state(dir: &std::path::Path) -> Arc<AppState> {
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(dir.join("index.db")).with_init(
+            |conn| {
+                conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))?;
+                conn.execute("PRAGMA synchronous=NORMAL", [])?;
+                conn.execute("PRAGMA foreign_keys=ON", [])?;
+                Ok(())
+            },
+        );
+        let pool = r2d2::Pool::builder()
+            .max_size(4)
+            .min_idle(Some(0))
+            .build(manager)
+            .expect("create test pool");
+        let fts_available = crate::db::init_db(&pool);
+        Arc::new(crate::app_state::AppState {
+            pool,
+            fts_available,
+            version: "test".to_string(),
+            web_token: "test-token".to_string(),
+            directory: Mutex::new(String::new()),
+            settings: Mutex::new(crate::types::Settings::default()),
+            job: Mutex::new(crate::types::JobState::default()),
+            app_handle: Mutex::new(None),
+            state_file: dir.join("webui_state.json"),
+        })
+    }
+
+    #[test]
+    fn deep_index_runs_twice_without_hanging() {
+        let dir = std::env::temp_dir().join(format!("xlsxsearcher-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        make_test_workbook(&dir.join("dataset.xlsx"));
+        let state = make_temp_state(&dir);
+        let scan_dir = dir.to_string_lossy().to_string();
+
+        // First scan: indexes the file and auto deep-indexes both sheets.
+        scan_worker(state.clone(), scan_dir.clone());
+        assert!(
+            !state.job.lock().unwrap().running,
+            "job should be finished after first scan: {:?}",
+            state.job.lock().unwrap().error
+        );
+        let pending = crate::db::get_index_status(&state.pool).unwrap().pending_deep_index_count;
+        assert_eq!(pending, 0, "first scan should deep-index all sheets");
+
+        // Second scan of the same files must not hang and must be a no-op.
+        let start = std::time::Instant::now();
+        scan_worker(state.clone(), scan_dir.clone());
+        assert!(!state.job.lock().unwrap().running, "job stuck after second scan");
+        assert!(start.elapsed().as_secs() < 5, "second scan too slow");
+
+        // Manual deep index on an up-to-date index must complete immediately.
+        let result = deep_index_internal(state.clone()).unwrap();
+        assert_eq!(result, (0, 0), "second deep index should be a no-op");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1001,7 +1001,10 @@ async function exportResults() {
   toast("已导出 CSV", "success");
 }
 
-async function runAction(action: "open" | "locate" | "copy") {
+async function runAction(
+  action: "open" | "locate" | "copy",
+  sheetName = "",
+) {
   if (!ui.selectedFile) {
     toast("请先选择文件", "error");
     return;
@@ -1010,6 +1013,7 @@ async function runAction(action: "open" | "locate" | "copy") {
     await apiPost("/api/action", {
       action,
       filepath: ui.selectedFile,
+      sheet_name: sheetName,
     });
     if (action === "copy") toast("路径已复制到剪贴板", "success");
   } catch (error) {
@@ -1280,7 +1284,9 @@ function init() {
     );
     if (rowElement?.dataset.index != null) {
       const row = ui.rows[Number(rowElement.dataset.index)];
-      if (row) void runAction("open");
+      if (row) {
+        void runAction("open", row.type === "sheet" ? row.sheetName : "");
+      }
     }
   });
   const resultScroll = element<HTMLElement>("result-scroll");
