@@ -10,6 +10,7 @@ pub struct AppState {
     pub pool: DbPool,
     pub fts_available: bool,
     pub version: String,
+    pub web_token: String,
     pub directory: Mutex<String>,
     pub settings: Mutex<Settings>,
     pub job: Mutex<JobState>,
@@ -44,6 +45,7 @@ impl AppState {
             pool,
             fts_available,
             version: config.version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
+            web_token: generate_web_token(),
             directory: Mutex::new(directory),
             settings: Mutex::new(settings),
             job: Mutex::new(JobState::default()),
@@ -182,4 +184,23 @@ fn load_settings(state_file: &PathBuf) -> Settings {
         .get("settings")
         .and_then(|v| serde_json::from_value::<Settings>(v.clone()).ok())
         .unwrap_or_default()
+}
+
+fn generate_web_token() -> String {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        if let Ok(mut file) = fs::File::open("/dev/urandom") {
+            let mut buf = [0u8; 16];
+            if file.read_exact(&mut buf).is_ok() {
+                return buf.iter().map(|b| format!("{:02x}", b)).collect();
+            }
+        }
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{}", nanos, std::process::id())
 }

@@ -33,6 +33,7 @@ export interface Settings {
   theme: "system" | "light" | "dark";
   show_alias_column: boolean;
   column_widths: Record<string, number> | null;
+  enable_web_interface: boolean;
 }
 
 export interface SearchResult {

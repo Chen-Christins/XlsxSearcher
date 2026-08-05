@@ -36,6 +36,7 @@ interface Settings {
   theme: ThemeChoice;
   showAliasColumn: boolean;
   columnWidths: Record<string, number> | null;
+  enableWebInterface: boolean;
 }
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
@@ -56,6 +57,7 @@ const settings: Settings = {
   theme: "system",
   showAliasColumn: true,
   columnWidths: null,
+  enableWebInterface: true,
 };
 let settingsLoaded = false;
 
@@ -64,6 +66,7 @@ function persistSettings() {
     theme: settings.theme,
     show_alias_column: settings.showAliasColumn,
     column_widths: settings.columnWidths,
+    enable_web_interface: settings.enableWebInterface,
   }).catch(() => {});
 }
 
@@ -71,8 +74,11 @@ function applyServerSettings(api: ApiSettings) {
   settings.theme = api.theme ?? settings.theme;
   settings.showAliasColumn = api.show_alias_column ?? settings.showAliasColumn;
   settings.columnWidths = api.column_widths ?? null;
+  settings.enableWebInterface =
+    api.enable_web_interface ?? settings.enableWebInterface;
   applyTheme();
   applyColumns();
+  applyWebInterface();
   syncSettingsControls();
 }
 
@@ -90,6 +96,11 @@ function applyColumns() {
     !settings.showAliasColumn,
   );
   applyGridTemplate();
+}
+
+function applyWebInterface() {
+  element<HTMLElement>("open-browser-btn").style.display =
+    isTauri() && settings.enableWebInterface ? "" : "none";
 }
 
 function applyGridTemplate() {
@@ -1007,9 +1018,11 @@ async function runAction(action: "open" | "locate" | "copy") {
 }
 
 async function openWebUi() {
+  const token = new URLSearchParams(location.search).get("token") ?? "";
+  const url = location.origin + (token ? `?token=${token}` : "");
   if (isTauri()) {
     try {
-      await openBrowser(location.origin);
+      await openBrowser(url);
       toast("已在系统浏览器打开 Web 界面", "success");
     } catch (error) {
       toast(`打开 Web 界面失败：${messageOf(error)}`, "error");
@@ -1017,7 +1030,7 @@ async function openWebUi() {
     return;
   }
 
-  window.open(location.origin, "_blank");
+  window.open(url, "_blank");
 }
 
 function toast(message: string, type: "success" | "error" | "info" = "info") {
@@ -1121,6 +1134,13 @@ function setupSettings() {
     persistSettings();
   });
 
+  const webCheck = element<HTMLInputElement>("enable-web-interface");
+  webCheck.addEventListener("change", () => {
+    settings.enableWebInterface = webCheck.checked;
+    applyWebInterface();
+    persistSettings();
+  });
+
   window
     .matchMedia("(prefers-color-scheme: dark)")
     .addEventListener("change", () => {
@@ -1135,10 +1155,13 @@ function syncSettingsControls() {
       button.classList.toggle("active", button.dataset.themeChoice === settings.theme);
     });
   element<HTMLInputElement>("show-alias-col").checked = settings.showAliasColumn;
+  element<HTMLInputElement>("enable-web-interface").checked =
+    settings.enableWebInterface;
 }
 
 function init() {
   setupTitlebar();
+  applyWebInterface();
   applyTheme();
   applyColumns();
   syncSettingsControls();

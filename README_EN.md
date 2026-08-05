@@ -56,8 +56,7 @@ npm run tauri -- dev
 
 ### Web Interface Mode
 
-The desktop client has a **Web UI** button in the top bar that opens the same interface in the system browser.
-```
+The desktop client has a **Web UI** button in the top bar that opens the same interface in the system browser. You can disable it in Settings (gear button, "开启 Web 界面"); when disabled the button disappears and the interface is not accessible from a browser.
 
 ### Workflow
 

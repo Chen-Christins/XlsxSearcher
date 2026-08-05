@@ -2,8 +2,9 @@ use crate::alias;
 use crate::app_state::AppState;
 use crate::db;
 use crate::scanner;
-use axum::extract::{Query, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::extract::{Query, Request, State};
+use axum::http::{header, HeaderValue, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -18,6 +19,22 @@ use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
 static WEBUI_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../webui/dist");
+
+// Custom user agent set on the desktop webview so the API can tell the built-in
+// window apart from an external browser. Used to enforce enable_web_interface.
+// Keeps an OS token (e.g. "macos") so the frontend can still detect the host
+// platform via navigator.userAgent for the per-OS titlebar layout.
+pub const WEBVIEW_UA_PREFIX: &str = "XlsxSearcher-webview";
+
+pub fn webview_user_agent() -> String {
+    format!(
+        "{}/{} ({} {})",
+        WEBVIEW_UA_PREFIX,
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
 
 fn content_type(path: &str) -> &'static str {
     if path.ends_with(".js") {
@@ -188,9 +205,61 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/open-browser", post(open_browser_handler))
         .route("/api/settings", post(settings_handler))
         .fallback(webui_fallback_handler)
+        .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .layer(CorsLayer::permissive())
         .with_state(state);
     api
+}
+
+async fn require_token(
+    State(state): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if request.uri().path() == "/api/health" {
+        return next.run(request).await;
+    }
+    if !state.settings.lock().expect("settings lock").enable_web_interface
+        && !request
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ua| ua.starts_with(WEBVIEW_UA_PREFIX))
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "Web 界面已关闭" })),
+        )
+            .into_response();
+    }
+    let query_token = request.uri().query().and_then(|q| {
+        q.split('&')
+            .find_map(|pair| pair.split_once('=').filter(|(k, _)| *k == "token").map(|(_, v)| v.to_string()))
+    });
+    let cookie_token = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|c| {
+            c.split(';')
+                .find_map(|part| part.trim().strip_prefix("xlsx_token=").map(|v| v.to_string()))
+        });
+    let valid = query_token.as_deref() == Some(state.web_token.as_str())
+        || cookie_token.as_deref() == Some(state.web_token.as_str());
+    if !valid {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "ok": false, "error": "无权访问" })),
+        )
+            .into_response();
+    }
+    let mut response = next.run(request).await;
+    if query_token.is_some() {
+        if let Ok(value) = HeaderValue::from_str(&format!("xlsx_token={}; Path=/", state.web_token)) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 async fn state_handler(State(state): State<SharedState>) -> ApiResult {
@@ -649,7 +718,13 @@ async fn window_action_handler(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn open_browser_handler(Json(body): Json<OpenBrowserBody>) -> ApiResult {
+async fn open_browser_handler(
+    State(state): State<SharedState>,
+    Json(body): Json<OpenBrowserBody>,
+) -> ApiResult {
+    if !state.settings.lock().expect("settings lock").enable_web_interface {
+        return Err(ApiError::bad_request("Web 界面已关闭"));
+    }
     if body.url.is_empty() {
         return Err(ApiError::bad_request("缺少 URL"));
     }
@@ -663,4 +738,116 @@ async fn settings_handler(
 ) -> ApiResult {
     state.set_settings(settings);
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    async fn router_with_web_interface(enabled: bool) -> Router {
+        let state = crate::app_state::AppState::new();
+        state.settings.lock().unwrap().enable_web_interface = enabled;
+        build_router(state)
+    }
+
+    #[tokio::test]
+    async fn web_interface_off_blocks_external_browser() {
+        let router = router_with_web_interface(false).await;
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/state")
+                    .header(header::USER_AGENT, "Mozilla/5.0 (Macintosh)")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn web_interface_off_allows_webview_with_token() {
+        let state = crate::app_state::AppState::new();
+        state.settings.lock().unwrap().enable_web_interface = false;
+        let token = state.web_token.clone();
+        let router = build_router(state);
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/api/state?token={}", token))
+                    .header(header::USER_AGENT, WEBVIEW_UA_PREFIX)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn web_interface_off_blocks_webview_without_token() {
+        let router = router_with_web_interface(false).await;
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/state")
+                    .header(header::USER_AGENT, WEBVIEW_UA_PREFIX)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn stale_cookie_is_refreshed_so_assets_still_load() {
+        let state = crate::app_state::AppState::new();
+        state.settings.lock().unwrap().enable_web_interface = true;
+        let router = build_router(state.clone());
+        let token = state.web_token.clone();
+
+        // Page load with a valid query token but a stale cookie from a previous
+        // launch (the fixed port persists cookies across sessions).
+        let res = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&format!("/?token={}", token))
+                    .header(header::USER_AGENT, "Mozilla/5.0")
+                    .header(header::COOKIE, "xlsx_token=stale-old-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let set_cookie = res
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+            .join("; ");
+        assert!(set_cookie.contains("xlsx_token="), "cookie should be refreshed");
+
+        // Asset request carrying the refreshed cookie must load.
+        let res = router
+            .oneshot(
+                Request::builder()
+                    .uri("/styles.css")
+                    .header(header::USER_AGENT, "Mozilla/5.0")
+                    .header(header::COOKIE, &set_cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap().starts_with("text/css"));
+    }
 }

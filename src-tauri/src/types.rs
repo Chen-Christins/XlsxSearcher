@@ -90,6 +90,12 @@ pub struct Settings {
     pub show_alias_column: bool,
     #[serde(default)]
     pub column_widths: Option<HashMap<String, f64>>,
+    #[serde(default = "default_true")]
+    pub enable_web_interface: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -98,6 +104,7 @@ impl Default for Settings {
             theme: "system".to_string(),
             show_alias_column: true,
             column_widths: None,
+            enable_web_interface: true,
         }
     }
 }
