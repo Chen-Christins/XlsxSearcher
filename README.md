@@ -26,6 +26,7 @@ Excel 配置表搜索工具 — 面向游戏策划，快速定位 xlsx/xls 文�
 - 📤 **导出结果**: 将当前搜索结果导出为 CSV 文件
 - ⚡ **索引加速**: 首次扫描后建立 SQLite 索引，搜索毫秒级响应
 - 🔄 **增量更新**: 重新扫描只更新有变化的文件
+- 🔁 **应用自更新**: 启动时检查 GitHub Releases 新版本，用户确认后自动下载并安装
 - 🚀 **性能优化**: 扫描和深度索引经过多轮优化，支持数万文件的高效处理
 - 🛡️ **大文件保护**: 深度索引自动跳过 200MB 以上的文件，避免内存溢出
 - 💾 **偏好恢复**: 记住上次扫描目录、匹配模式、排序方式和视图模式
@@ -150,10 +151,23 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 # XlsxSearcher 应用配置
 app:
   name: XlsxSearcher
-  version: "1.4.3"          # 版本号，发布时修改此处
+  version: "1.4.4"          # 版本号，发布时修改此处
   icon: icons/app_icon.png   # 运行时窗口图标
   data_dir: ~/.local/XlsxSearcher  # 数据库和日志存放目录
+  update:                    # 应用自更新
+    enabled: true            # 自更新总开关
+    check_on_startup: true   # 启动时静默检查，发现新版本后弹窗询问
+    repo: Chen-Christins/XlsxSearcher  # GitHub 仓库（Releases 来源）
 ```
+
+## 自动更新
+
+打包版应用启动时会后台检查 GitHub Releases（仅认**已发布**的正式版本，draft 不会触发）。发现新版本时弹窗询问：
+
+- **立即更新**：后台下载对应平台的安装包，下载完成后提示重启，确认后整体替换可执行文件并自动重启。
+- **暂不更新**：跳过，本次运行不再打扰。
+
+也可随时通过菜单「帮助 → 检查更新…」手动检查。更新依赖 `app.yml` 中的 `version` 与发布 tag（`vX.Y.Z`）保持一致，CI 发布时会校验二者一致。
 
 ## 数据存储
 

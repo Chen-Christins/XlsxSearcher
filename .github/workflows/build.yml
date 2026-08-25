@@ -114,6 +114,16 @@ jobs:
           echo "lines=$(wc -l < /tmp/release_body.md)"
           cat /tmp/release_body.md
 
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          YML_VERSION="$(grep -E '^[[:space:]]*version:' app.yml | head -n1 | sed -E 's/.*version:[[:space:]]*"?([0-9.]+)"?.*/\1/')"
+          echo "tag=$TAG_VERSION app.yml=$YML_VERSION"
+          if [ "$TAG_VERSION" != "$YML_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION does not match app.yml version $YML_VERSION"
+            exit 1
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

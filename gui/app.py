@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 
 import yaml
 
@@ -17,6 +18,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
 from PyQt5.QtGui import QBrush, QColor, QIcon
 
+from core import updater
 from core.indexer import IndexManager
 from core.alias_parser import parse_sheet_alias_file
 from core.scanner import XlsxScanner
@@ -39,6 +41,12 @@ _cfg_app = _CONFIG.get('app', {})
 VERSION = _cfg_app.get('version', '0.0.0')
 DATA_DIR = os.path.normpath(os.path.expanduser(_cfg_app.get('data_dir', '~/.local/XlsxSearcher')))
 ICON_REL = _cfg_app.get('icon', 'icons/app_icon.png')
+
+_cfg_update = _cfg_app.get('update', {})
+UPDATE_ENABLED = _cfg_update.get('enabled', True)
+CHECK_ON_STARTUP = _cfg_update.get('check_on_startup', True)
+UPDATE_REPO = _cfg_update.get('repo', 'Chen-Christins/XlsxSearcher')
+UPDATE_TOKEN = os.environ.get('GITHUB_TOKEN') or _cfg_update.get('token')
 
 os.makedirs(DATA_DIR, exist_ok=True)
 LOG_PATH = os.path.join(DATA_DIR, "app.log")
@@ -331,6 +339,75 @@ class VcsUpdateWorker(QThread):
             self.error.emit(str(e))
 
 
+class UpdateCheckWorker(QThread):
+    """版本检查工作线程 — 后台查询 GitHub Releases，避免阻塞 UI"""
+    finished = pyqtSignal(object)  # {'version', 'notes', 'asset'} 或 None（无更新）
+    error = pyqtSignal(str)
+
+    def __init__(self, repo, current_version, token=None):
+        super().__init__()
+        self.repo = repo
+        self.current_version = current_version
+        self.token = token
+
+    def run(self):
+        try:
+            release = updater.get_latest_release(self.repo, token=self.token)
+            if not release:
+                self.finished.emit(None)
+                return
+
+            latest_tag = release.get('tag_name', '')
+            if updater.compare_versions(latest_tag, self.current_version) <= 0:
+                self.finished.emit(None)
+                return
+
+            asset = updater.pick_asset(release)
+            if not asset:
+                self.finished.emit(None)
+                return
+
+            self.finished.emit({
+                'version': latest_tag,
+                'notes': release.get('body', ''),
+                'asset': asset,
+            })
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class UpdateDownloadWorker(QThread):
+    """更新包下载工作线程 — 流式下载到临时目录并上报进度"""
+    progress = pyqtSignal(int, int)  # downloaded, total
+    finished = pyqtSignal(str)       # 下载好的 zip 路径
+    error = pyqtSignal(str)
+
+    def __init__(self, asset, token=None):
+        super().__init__()
+        self.asset = asset
+        self.token = token
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        try:
+            tmpdir = tempfile.mkdtemp(prefix='xlsxsearcher_update_')
+            dest = os.path.join(tmpdir, 'update.zip')
+            updater.download(
+                self.asset['browser_download_url'],
+                dest,
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+                token=self.token,
+            )
+            if not self._cancelled:
+                self.finished.emit(dest)
+        except Exception as e:
+            if not self._cancelled:
+                self.error.emit(str(e))
+
+
 class XlsxSearcherApp(QMainWindow):
     MAX_SEARCH_HISTORY = 15
 
@@ -355,6 +432,9 @@ class XlsxSearcherApp(QMainWindow):
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
         self._pending_status_prefix = ''
+        self.is_updating = False
+        self.update_check_worker = None
+        self.update_download_worker = None
         self.preview_state = {
             'filepath': '',
             'sheet_name': '',
@@ -630,6 +710,15 @@ class XlsxSearcherApp(QMainWindow):
             about_action.triggered.connect(self._show_about)
             about_action.setMenuRole(QAction.AboutRole)
             help_menu.addAction(about_action)
+
+        check_update_action = QAction("检查更新...", self)
+        check_update_action.triggered.connect(self._check_update_manual)
+        if sys.platform == 'darwin':
+            help_menu.addAction(check_update_action)
+        else:
+            menubar = self.menuBar()
+            help_menu = menubar.addMenu("帮助")
+            help_menu.addAction(check_update_action)
 
 
 
@@ -1011,6 +1100,134 @@ class XlsxSearcherApp(QMainWindow):
         self.btn_vcs_update.setEnabled(True)
         self.status_bar.showMessage("更新出错")
         _msgbox(self, 'error', '更新失败', error_msg)
+
+    def _start_startup_update_check(self):
+        """启动时静默检查更新：仅有新版本时弹窗询问，否则不打扰。"""
+        if not UPDATE_ENABLED or not CHECK_ON_STARTUP:
+            return
+        if not getattr(sys, 'frozen', False):
+            return  # 非打包环境不检查自更新
+        self._check_update(silent=True)
+
+    def _check_update_manual(self):
+        """手动检查更新：无论结果如何都给出反馈。"""
+        if not UPDATE_ENABLED:
+            _msgbox(self, 'info', '提示', '应用自更新未启用')
+            return
+        if self.is_scanning or self.is_updating:
+            return
+        self._check_update(silent=False)
+
+    def _check_update(self, silent):
+        """发起版本检查（后台线程）。silent=True 时已最新/出错不弹窗。"""
+        if self.is_updating:
+            return
+        self.is_updating = True
+        self.status_bar.showMessage("正在检查更新...")
+        self.update_check_worker = UpdateCheckWorker(
+            UPDATE_REPO, VERSION, token=UPDATE_TOKEN
+        )
+        self.update_check_worker.finished.connect(
+            lambda result: self._on_update_check_finished(result, silent)
+        )
+        self.update_check_worker.error.connect(
+            lambda msg: self._on_update_check_error(msg, silent)
+        )
+        self.update_check_worker.start()
+
+    def _on_update_check_finished(self, result, silent):
+        """检查完成：无更新时按 silent 决定是否提示；有更新则弹窗询问。"""
+        self.is_updating = False
+        if result is None:
+            self.status_bar.showMessage("已是最新版本")
+            if not silent:
+                _msgbox(self, 'info', '检查更新', f'当前已是最新版本（v{VERSION}）')
+            return
+
+        version = result['version']
+        notes = (result.get('notes') or '').strip()
+        body = f"发现新版本 {version}（当前 v{VERSION}）\n\n{notes}"
+        self.status_bar.showMessage(f"发现新版本 {version}")
+        reply = _msgbox(
+            self, 'question', '发现新版本', body,
+            buttons=QMessageBox.Yes | QMessageBox.No,
+            default_button=QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self._start_update_download(result['asset'])
+
+    def _on_update_check_error(self, error_msg, silent):
+        self.is_updating = False
+        self.status_bar.showMessage("检查更新失败")
+        logging.warning("Update check failed: %s", error_msg)
+        if not silent:
+            _msgbox(self, 'error', '检查更新失败', error_msg)
+
+    def _start_update_download(self, asset):
+        """开始后台下载更新包。"""
+        if self.is_scanning:
+            return
+        self.is_updating = True
+        self.status_bar.showMessage("正在下载更新...")
+        self.scan_progress.setVisible(True)
+        self.scan_progress.setRange(0, 100)
+        self.scan_progress.setValue(0)
+
+        self.update_download_worker = UpdateDownloadWorker(asset, token=UPDATE_TOKEN)
+        self.update_download_worker.progress.connect(self._on_update_download_progress)
+        self.update_download_worker.finished.connect(self._on_update_download_finished)
+        self.update_download_worker.error.connect(self._on_update_download_error)
+        self.update_download_worker.start()
+
+    def _on_update_download_progress(self, downloaded, total):
+        if total:
+            percent = int(downloaded * 100 / total)
+            self.scan_progress.setValue(percent)
+            self.status_bar.showMessage(f"正在下载更新... {percent}%")
+
+    def _on_update_download_finished(self, zip_path):
+        self.is_updating = False
+        self.scan_progress.setVisible(False)
+        self.status_bar.showMessage("更新已下载完成")
+        self._install_update(zip_path)
+
+    def _on_update_download_error(self, error_msg):
+        self.is_updating = False
+        self.scan_progress.setVisible(False)
+        self.status_bar.showMessage("更新下载失败")
+        _msgbox(self, 'error', '更新下载失败', error_msg)
+
+    def _install_update(self, zip_path):
+        """解压更新包、准备替换脚本，并在用户确认后重启。"""
+        try:
+            target_path = updater.get_current_install_path()
+            if not target_path:
+                raise RuntimeError('当前运行环境不支持自更新')
+
+            extract_dir = os.path.join(os.path.dirname(zip_path), 'extracted')
+            os.makedirs(extract_dir, exist_ok=True)
+            updater.extract_zip(zip_path, extract_dir)
+            new_path = updater.locate_new_executable(extract_dir)
+            if not new_path:
+                raise RuntimeError('下载的更新包中未找到可执行文件')
+
+            helper = updater.write_replace_helper(os.getpid(), new_path, target_path)
+
+            reply = _msgbox(
+                self, 'question', '更新已就绪',
+                '新版本已下载完成，是否立即重启以完成更新？',
+                buttons=QMessageBox.Yes | QMessageBox.No,
+                default_button=QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                self.status_bar.showMessage("已取消安装，可稍后重新检查更新")
+                return
+
+            updater.launch_replace(helper)
+            QApplication.quit()
+        except Exception as e:
+            logging.exception("Update install failed")
+            _msgbox(self, 'error', '更新失败', str(e))
 
     def _start_scan(self):
         """开始扫描（在线程中执行）"""
@@ -1935,4 +2152,5 @@ def run_app():
         QTimer.singleShot(50, _fix_macos_app_title)
 
     window.show()
+    window._start_startup_update_check()
     sys.exit(app.exec_())

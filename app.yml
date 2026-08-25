@@ -8,3 +8,11 @@ app:
   # 数据存储目录，存放 index.db 和 app.log
   # 支持 ~ 开头的用户目录写法
   data_dir: ~/.local/XlsxSearcher
+  # 应用自更新配置
+  update:
+    # 自更新总开关
+    enabled: true
+    # 启动时静默检查更新，发现新版本后弹窗询问
+    check_on_startup: true
+    # GitHub 仓库，用于查询 Releases
+    repo: Chen-Christins/XlsxSearcher

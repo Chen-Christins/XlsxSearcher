@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **应用自更新**：新增 `core/updater.py`，启动时后台检查 GitHub Releases（过滤 draft，仅认已发布版本），发现新版本后弹窗询问，用户确认后后台下载并按平台整体替换可执行文件、自动重启。支持「帮助 → 检查更新…」手动检查；CI 发布新增版本号与 tag 一致性校验
+
 ## [1.4.4] - 2026-07-14
 
 ### Added
