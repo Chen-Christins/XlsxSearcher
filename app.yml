@@ -2,7 +2,7 @@
 app:
   name: XlsxSearcher
   # 应用版本号，打包/发布时修改此处即可
-  version: "1.4.4"
+  version: "1.5.0"
   # 图标路径，相对于应用根目录
   icon: icons/app_icon.png
   # 数据存储目录，存放 index.db 和 app.log

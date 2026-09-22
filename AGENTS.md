@@ -7,7 +7,7 @@
 
 ## Packaging
 - `pyinstaller` is not listed in `requirements.txt`; install it separately before packaging, matching CI: `python -m pip install --upgrade pip && pip install -r requirements.txt && pip install pyinstaller`.
-- CI builds the app from `main.py` with `pyinstaller --onefile --windowed --name ... main.py` on macOS, Windows, and Ubuntu. Trust `.github/workflows/build.yml` over the README packaging examples.
+- CI builds the app from `main.py` with `pyinstaller --onedir --windowed --name ... main.py` on macOS, Windows, and Ubuntu. `--onedir` (not `--onefile`) keeps startup fast by avoiding per-launch extraction; artifacts are folders (`.app` on macOS) and must be distributed whole. Trust `.github/workflows/build.yml` over the README packaging examples.
 
 ## Architecture
 - `main.py` is only a thin entrypoint; the real app wiring lives in `gui/app.py`.

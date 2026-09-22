@@ -109,38 +109,38 @@ XlsxSearcher/
 ### macOS
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
 ```
 
-生成的 `.app` 在 `dist` 目录下，解压后双击运行。
+生成的 `XlsxSearcher.app` 在 `dist` 目录下，解压后双击运行。
 
 ### Windows
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
   --add-data "app.yml;." \
   main.py
 ```
 
-生成的 `.exe` 在 `dist` 目录下。
+生成的 `dist/XlsxSearcher/` 文件夹即完整程序，运行其中的 `XlsxSearcher.exe`；分发时请整体打包该文件夹。
 
 ### Linux
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
 ```
 
-生成的可执行文件在 `dist` 目录下。
+生成的 `dist/XlsxSearcher/` 文件夹即完整程序，运行其中的可执行文件；分发时请整体打包该文件夹。
 
 ## 配置
 
@@ -150,7 +150,7 @@ pyinstaller --onefile --windowed --name XlsxSearcher \
 # XlsxSearcher 应用配置
 app:
   name: XlsxSearcher
-  version: "1.4.3"          # 版本号，发布时修改此处
+  version: "1.5.0"          # 版本号，发布时修改此处
   icon: icons/app_icon.png   # 运行时窗口图标
   data_dir: ~/.local/XlsxSearcher  # 数据库和日志存放目录
 ```

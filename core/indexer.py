@@ -137,12 +137,19 @@ class IndexManager:
                         INSERT INTO sheets_fts{suffix}(rowid, {col}) VALUES (new.id, new.{col});
                     END
                 ''')
-                # 回填（幂等，可重复执行）
-                cursor.execute(f'''
-                    INSERT INTO sheets_fts{suffix}(rowid, {col})
-                    SELECT id, {col} FROM sheets
-                    WHERE id NOT IN (SELECT rowid FROM sheets_fts{suffix})
-                ''')
+                # 回填（幂等，可重复执行）。触发器已保证常规增删改同步，
+                # 仅在行数不一致时（首次创建 / FTS 缺数据）才做全表回填，
+                # 避免每次启动都对整张 sheets 表跑昂贵的 NOT IN 扫描。
+                cursor.execute('SELECT COUNT(*) FROM sheets')
+                sheets_count = cursor.fetchone()[0]
+                cursor.execute(f'SELECT COUNT(*) FROM sheets_fts{suffix}')
+                fts_count = cursor.fetchone()[0]
+                if fts_count != sheets_count:
+                    cursor.execute(f'''
+                        INSERT INTO sheets_fts{suffix}(rowid, {col})
+                        SELECT id, {col} FROM sheets
+                        WHERE id NOT IN (SELECT rowid FROM sheets_fts{suffix})
+                    ''')
             return True
         except sqlite3.OperationalError as e:
             print(f"警告: FTS5 trigram 不可用，搜索降级为 LIKE: {e}")

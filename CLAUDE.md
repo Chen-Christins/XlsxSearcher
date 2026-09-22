@@ -24,11 +24,13 @@ There is no test suite, linter config, or typecheck setup in this repo.
 pip install pyinstaller
 
 # Build standalone app (macOS / Linux separator is `:`, Windows is `;`)
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png:icons" \
   main.py
 ```
+
+`--onedir` (not `--onefile`) is required for fast startup: `--onefile` re-extracts the whole runtime to a temp dir on every launch. The output is a `dist/XlsxSearcher/` folder (or `dist/XlsxSearcher.app` on macOS) that must be distributed as a whole.
 
 CI (`.github/workflows/build.yml`) builds on push to `master`, PRs to `master`, version tags (`v*`), and manual dispatch. The matrix builds macOS, Windows, and Ubuntu, each with `python-version: '3.11'`. On tag pushes it creates a draft GitHub Release and attaches per-platform `.zip` artifacts.
 

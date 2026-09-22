@@ -22,7 +22,7 @@ jobs:
             exe_name: XlsxSearcher
           - os: windows-latest
             artifact_name: XlsxSearcher-windows
-            exe_name: XlsxSearcher.exe
+            exe_name: XlsxSearcher
           - os: ubuntu-latest
             artifact_name: XlsxSearcher-linux
             exe_name: XlsxSearcher
@@ -55,7 +55,7 @@ jobs:
             SEP=":"
             ICON_FILE="icons/app_icon.png"
           fi
-          pyinstaller --onefile --windowed --name ${{ matrix.exe_name }} \
+          pyinstaller --onedir --windowed --name ${{ matrix.exe_name }} \
             --icon "$ICON_FILE" \
             --add-data "icons/app_icon.png${SEP}icons" \
             --add-data "app.yml${SEP}." \
@@ -66,13 +66,14 @@ jobs:
         run: |
           cd dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            powershell -Command "Compress-Archive -Path ${{ matrix.exe_name }} -DestinationPath ${{ matrix.artifact_name }}.zip -Force"
+            # onedir: zip the whole folder (exe + _internal)
+            powershell -Command "Compress-Archive -Path XlsxSearcher -DestinationPath ${{ matrix.artifact_name }}.zip -Force"
           elif [ "${{ matrix.os }}" = "macos-latest" ]; then
             # macOS .app is a directory bundle — must use -r and NOT use -j
-            zip -ry ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}.app
+            zip -ry ${{ matrix.artifact_name }}.zip XlsxSearcher.app
           else
-            # Linux single binary
-            zip -j ${{ matrix.artifact_name }}.zip ${{ matrix.exe_name }}
+            # Linux onedir folder
+            zip -ry ${{ matrix.artifact_name }}.zip XlsxSearcher
           fi
           ls -la
 

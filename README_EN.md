@@ -109,38 +109,38 @@ XlsxSearcher/
 ### macOS
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
 ```
 
-The generated `.app` is in the `dist` directory. Extract and double-click to run.
+The generated `XlsxSearcher.app` is in the `dist` directory. Extract and double-click to run.
 
 ### Windows
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.ico \
   --add-data "icons/app_icon.png;icons" \
   --add-data "app.yml;." \
   main.py
 ```
 
-The generated `.exe` is in the `dist` directory.
+The generated `dist/XlsxSearcher/` folder is the complete program — run `XlsxSearcher.exe` inside it. Distribute the whole folder.
 
 ### Linux
 
 ```bash
-pyinstaller --onefile --windowed --name XlsxSearcher \
+pyinstaller --onedir --windowed --name XlsxSearcher \
   --icon icons/app_icon.png \
   --add-data "icons/app_icon.png:icons" \
   --add-data "app.yml:." \
   main.py
 ```
 
-The generated executable is in the `dist` directory.
+The generated `dist/XlsxSearcher/` folder is the complete program — run the executable inside it. Distribute the whole folder.
 
 ## Configuration
 
@@ -150,7 +150,7 @@ Application config `app.yml` is located at the project root. You can customize v
 # XlsxSearcher application configuration
 app:
   name: XlsxSearcher
-  version: "1.4.3"          # App version, update here before release
+  version: "1.5.0"          # App version, update here before release
   icon: icons/app_icon.png   # Runtime window icon
   data_dir: ~/.local/XlsxSearcher  # Database and log directory
 ```

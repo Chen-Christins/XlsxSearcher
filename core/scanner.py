@@ -12,11 +12,20 @@ try:
 except ImportError:
     HAS_CALAMINE = False
 
-from openpyxl import load_workbook
-import xlrd
-
 # XML 命名空间
 NS = {'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+
+def _load_workbook(*args, **kwargs):
+    """延迟导入 openpyxl（较重，仅兜底路径使用），避免拖慢应用启动。"""
+    from openpyxl import load_workbook
+    return load_workbook(*args, **kwargs)
+
+
+def _open_xls(*args, **kwargs):
+    """延迟导入 xlrd，仅在处理 .xls 时加载。"""
+    import xlrd
+    return xlrd.open_workbook(*args, **kwargs)
 
 # 编译正则：从 xl/workbook.xml 直接提取 sheet name，比 DOM 解析快 2-3x
 # 格式: <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
@@ -104,7 +113,7 @@ class XlsxScanner:
     def _get_sheet_names_xls(self, filepath: str) -> List[str]:
         """使用 xlrd 获取 .xls 文件的子表名称"""
         try:
-            wb = xlrd.open_workbook(filepath, on_demand=True)
+            wb = _open_xls(filepath, on_demand=True)
             return wb.sheet_names()
         except Exception as e:
             print(f"警告: 读取 .xls 文件失败 {filepath}: {e}")
@@ -113,7 +122,7 @@ class XlsxScanner:
     def _get_sheet_names_slow(self, filepath: str) -> List[str]:
         """备用方式获取子表名称（使用 openpyxl）"""
         try:
-            wb = load_workbook(filepath, read_only=True, data_only=True)
+            wb = _load_workbook(filepath, read_only=True, data_only=True)
             sheet_names = wb.sheetnames
             wb.close()
             return sheet_names
@@ -185,7 +194,7 @@ class XlsxScanner:
         """openpyxl 回退版本"""
         wb = None
         try:
-            wb = load_workbook(filepath, read_only=True, data_only=True)
+            wb = _load_workbook(filepath, read_only=True, data_only=True)
             results = []
             for sheet_name in sheet_names:
                 if sheet_name not in wb.sheetnames:
@@ -221,7 +230,7 @@ class XlsxScanner:
         """xlrd 版本：提取 .xls 文件的单元格内容"""
         wb = None
         try:
-            wb = xlrd.open_workbook(filepath, on_demand=True)
+            wb = _open_xls(filepath, on_demand=True)
             results = []
             for sheet_name in sheet_names:
                 if sheet_name not in wb.sheet_names():
@@ -295,7 +304,7 @@ class XlsxScanner:
                 print(f"calamine 读取预览失败，回退到 openpyxl: {e}")
 
         try:
-            wb = load_workbook(filepath, read_only=True, data_only=True)
+            wb = _load_workbook(filepath, read_only=True, data_only=True)
             if sheet_name not in wb.sheetnames:
                 wb.close()
                 return []
@@ -320,7 +329,7 @@ class XlsxScanner:
                                  start_row: int = 1, start_col: int = 1) -> List[List[str]]:
         """xlrd 版本：读取 .xls 文件的预览数据"""
         try:
-            wb = xlrd.open_workbook(filepath, on_demand=True)
+            wb = _open_xls(filepath, on_demand=True)
             if sheet_name not in wb.sheet_names():
                 wb.release_resources()
                 return []
@@ -411,7 +420,7 @@ class XlsxScanner:
                                         preview_cols: int,
                                         start_row: int, start_col: int) -> tuple:
         """openpyxl 版本：read_only 模式下 iter_rows 本身懒加载，流式收益最大"""
-        wb = load_workbook(filepath, read_only=True, data_only=True)
+        wb = _load_workbook(filepath, read_only=True, data_only=True)
         try:
             if sheet_name not in wb.sheetnames:
                 return [], [], []
@@ -554,7 +563,7 @@ class XlsxScanner:
                                    start_row: int, start_col: int) -> tuple:
         """xlrd 版本：合并命中查找和预览读取（流式）"""
         try:
-            wb = xlrd.open_workbook(filepath, on_demand=True)
+            wb = _open_xls(filepath, on_demand=True)
             if sheet_name not in wb.sheet_names():
                 wb.release_resources()
                 return [], [], []
