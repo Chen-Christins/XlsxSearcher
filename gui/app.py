@@ -646,8 +646,10 @@ class XlsxSearcherApp(QMainWindow):
 
 
     def _show_about(self):
+        # 窗口隐藏到托盘时用 None 作父窗口，确保弹窗能正常置顶获得焦点
+        parent = self if self.isVisible() else None
         QMessageBox.about(
-            self,
+            parent,
             "关于 XlsxSearcher",
             f"<h3>XlsxSearcher v{VERSION}</h3>"
             "<p>Excel 子表搜索工具</p>"
@@ -674,6 +676,10 @@ class XlsxSearcherApp(QMainWindow):
         menu.addAction(self._tray_toggle_action)
 
         menu.addSeparator()
+        about_action = QAction(f"关于 XlsxSearcher {VERSION}", self)
+        about_action.triggered.connect(self._show_about)
+        menu.addAction(about_action)
+
         quit_action = QAction("退出", self)
         quit_action.triggered.connect(self._quit_app)
         menu.addAction(quit_action)
