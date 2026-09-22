@@ -22,7 +22,7 @@ jobs:
             exe_name: XlsxSearcher
           - os: windows-latest
             artifact_name: XlsxSearcher-windows
-            exe_name: XlsxSearcher.exe
+            exe_name: XlsxSearcher
           - os: ubuntu-latest
             artifact_name: XlsxSearcher-linux
             exe_name: XlsxSearcher
