@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-09-22
+
+### Added
+- **系统托盘常驻**：关闭窗口不再直接退出，而是隐藏到系统托盘（macOS 为菜单栏图标）。托盘右键菜单提供“显示主窗口”“关闭时最小化到托盘”（可勾选并持久化到 `QSettings`）与“退出”；首次隐藏提示一次，macOS 点击 Dock 图标可恢复窗口；系统无托盘时自动退回原有关闭即退出行为
+
+### Improved
+- **启动提速**：打包由 `--onefile` 改为 `--onedir`，消除每次启动解压整个运行时的开销；`core/scanner.py` 延迟导入 `openpyxl`/`xlrd`（仅兜底路径），启动不再加载 openpyxl/Pillow/xlrd；索引状态查询与初始搜索延后到窗口 `show()` 之后执行，首帧更快可见；FTS 回填仅在 `sheets` 与 FTS 行数不一致时执行，避免每次启动全表 `NOT IN` 扫描
+
+### Changed
+- **分发格式**：打包产物由单文件改为文件夹（macOS 为 `.app`），需整体分发；CI 同步调整 macOS/Windows/Linux 的 artifact 打包方式
+
 ## [1.4.4] - 2026-07-14
 
 ### Added

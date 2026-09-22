@@ -12,9 +12,10 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTreeWidget, QTreeWidgetItem, QLabel, QLineEdit, QPushButton,
     QStatusBar, QProgressBar, QMessageBox, QFileDialog, QComboBox,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QAction
+    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView, QAction,
+    QSystemTrayIcon, QMenu
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSettings, QTimer, QEvent
 from PyQt5.QtGui import QBrush, QColor, QIcon
 
 from core.indexer import IndexManager
@@ -355,6 +356,11 @@ class XlsxSearcherApp(QMainWindow):
         self.current_sort_mode = 'filename_asc'
         self.current_view_mode = 'grouped'
         self._pending_status_prefix = ''
+        # 托盘常驻
+        self.tray_icon = None
+        self._really_quit = False
+        self._tray_hint_shown = False
+        self._close_to_tray = self.settings.value('ui/close_to_tray', True, type=bool)
         self.preview_state = {
             'filepath': '',
             'sheet_name': '',
@@ -366,9 +372,15 @@ class XlsxSearcherApp(QMainWindow):
         }
 
         self._init_ui()
+        self._init_tray()
         self._restore_ui_preferences()
         self._restore_scan_directory()
         self._restore_search_history()
+        # 索引查询与初始搜索延后到窗口显示后执行（见 _deferred_startup），
+        # 避免拖慢首帧绘制。
+
+    def _deferred_startup(self):
+        """窗口显示后再查库并触发初始搜索，保证启动首帧尽快可见。"""
         self._refresh_index_status_label()
         self._check_existing_index()
 
@@ -641,6 +653,68 @@ class XlsxSearcherApp(QMainWindow):
             "<p>Excel 子表搜索工具</p>"
             "<p>快速搜索 Excel 文件中的工作表名称和单元格内容。</p>"
         )
+
+    def _init_tray(self):
+        """创建系统托盘图标，实现关闭窗口后常驻托盘。"""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+
+        self.tray_icon = QSystemTrayIcon(QApplication.windowIcon(), self)
+        self.tray_icon.setToolTip("XlsxSearcher")
+
+        menu = QMenu(self)
+        show_action = QAction("显示主窗口", self)
+        show_action.triggered.connect(self._restore_from_tray)
+        menu.addAction(show_action)
+
+        self._tray_toggle_action = QAction("关闭时最小化到托盘", self)
+        self._tray_toggle_action.setCheckable(True)
+        self._tray_toggle_action.setChecked(self._close_to_tray)
+        self._tray_toggle_action.toggled.connect(self._on_tray_toggle)
+        menu.addAction(self._tray_toggle_action)
+
+        menu.addSeparator()
+        quit_action = QAction("退出", self)
+        quit_action.triggered.connect(self._quit_app)
+        menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        """托盘图标激活：双击（全平台）或单击（非 macOS）恢复主窗口。"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._restore_from_tray()
+        elif reason == QSystemTrayIcon.Trigger and sys.platform != 'darwin':
+            self._restore_from_tray()
+
+    def _on_tray_toggle(self, checked):
+        """切换“关闭时最小化到托盘”开关并持久化。"""
+        self._close_to_tray = bool(checked)
+        self.settings.setValue('ui/close_to_tray', self._close_to_tray)
+
+    def _restore_from_tray(self):
+        """从托盘恢复主窗口。"""
+        self.show()
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive
+        )
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_app(self):
+        """真正退出程序：保存状态、清理连接并结束事件循环。"""
+        self._really_quit = True
+        self._save_ui_preferences()
+        self._save_scan_directory()
+        try:
+            self.index_manager.close_thread_connection()
+        except Exception:
+            pass
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+        QApplication.instance().quit()
 
     def _toggle_preview(self):
         """折叠/展开预览面板"""
@@ -1722,10 +1796,36 @@ class XlsxSearcherApp(QMainWindow):
         return "..." + path[-max_length:]
 
     def closeEvent(self, event):
-        """窗口关闭时保存偏好设置"""
+        """窗口关闭：保存偏好；启用托盘时隐藏到托盘而非退出。"""
         self._save_ui_preferences()
         self._save_scan_directory()
+
+        if (self.tray_icon is not None and self._close_to_tray
+                and not self._really_quit):
+            event.ignore()
+            self.hide()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray_icon.showMessage(
+                    "XlsxSearcher",
+                    "已最小化到托盘，右键图标可退出",
+                    QSystemTrayIcon.Information,
+                    3000,
+                )
+            return
+
+        self._really_quit = True
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         event.accept()
+        # 托盘模式下 quitOnLastWindowClosed 为 False，需显式结束事件循环
+        QApplication.instance().quit()
+
+    def event(self, event):
+        """macOS 点击 Dock 图标时，把隐藏到托盘的窗口重新显示出来。"""
+        if event.type() == QEvent.ApplicationActivate and self.isHidden():
+            self._restore_from_tray()
+        return super().event(event)
 
     def eventFilter(self, obj, event):
         """顶部区域拖拽窗口 + 双击放大（macOS 统一标题栏）"""
@@ -1928,6 +2028,10 @@ def run_app():
 
     window = XlsxSearcherApp()
 
+    # 托盘可用时，关闭窗口只隐藏，不因“最后窗口关闭”而退出应用
+    if window.tray_icon is not None:
+        app.setQuitOnLastWindowClosed(False)
+
     if sys.platform == 'darwin':
         # 提前创建原生窗口句柄，在 show() 之前应用透明标题栏，避免闪烁
         _ = window.winId()
@@ -1935,4 +2039,5 @@ def run_app():
         QTimer.singleShot(50, _fix_macos_app_title)
 
     window.show()
+    QTimer.singleShot(0, window._deferred_startup)
     sys.exit(app.exec_())
